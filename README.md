@@ -73,6 +73,10 @@ uv run python llm_server.py                  # serves ws://0.0.0.0:8765
 `paroli-server` is a C++ NPU engine. `setup_paroli.sh` builds it and fetches a
 voice in one shot (idempotent; prompts for sudo once for apt + the NPU runtime):
 
+The script auto-adapts to the board's OS: on trixie it installs the packaged
+`libdrogon-dev`; on Debian **bookworm** (where Drogon isn't packaged) it builds
+Drogon from source automatically (first run takes a few minutes longer).
+
 ```bash
 # a) one-time build + voice download (default voice: ljspeech)
 bash TTS/setup_paroli.sh

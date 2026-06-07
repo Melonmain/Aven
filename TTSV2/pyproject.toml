@@ -1,0 +1,14 @@
+[project]
+name = "aven-ttsv2"
+version = "0.1.0"
+description = "Aven TTSV2 node: WebSocket front for kokoro-server (Kokoro-82M NPU), relays PCM to the LLM node."
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=13",
+    "requests>=2.31",
+    "pyyaml>=6",
+]
+
+# App-style project: install the deps, but don't try to build this dir as a package.
+[tool.uv]
+package = false

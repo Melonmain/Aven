@@ -31,6 +31,12 @@ services:
     host: 127.0.0.1
     port: 8848
 
+  # kokoro-server TTS backend (TTSV2, improved Kokoro-82M voice) — local to the
+  # TTS board. Same port as paroli; run only one TTS backend at a time.
+  kokoro:
+    host: 127.0.0.1
+    port: 8848
+
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
@@ -49,3 +55,14 @@ tts:
   speaker_id: null
   # Speaking rate: >1 slower, <1 faster, null for the model default.
   length_scale: null
+
+# TTSV2 — kokoro-server backend (improved Kokoro-82M voice). Used by
+# TTSV2/voice_server.py, which listens on the same `services.tts` port (8766),
+# so the LLM node reaches it the same way. Run either paroli OR kokoro, not both.
+ttsv2:
+  # Kokoro voice name (list them via GET /api/v1/voices on kokoro-server).
+  voice: af_heart
+  # Speaking rate: 1.0 normal, >1 faster, <1 slower.
+  speed: 1.0
+  # Kokoro-82M native PCM rate.
+  sample_rate: 24000

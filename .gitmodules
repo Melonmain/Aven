@@ -10,3 +10,6 @@
 [submodule "wakeword/openWakeWord"]
 	path = wakeword/openWakeWord
 	url = https://github.com/dscripka/openWakeWord.git
+[submodule "TTSV2/kokoro-server"]
+	path = TTSV2/kokoro-server
+	url = https://github.com/marty1885/kokoro-server

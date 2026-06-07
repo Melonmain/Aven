@@ -93,6 +93,33 @@ uv run python voice_server.py                # serves ws://0.0.0.0:8766
 uv run python test_tts.py --host 127.0.0.1
 ```
 
+### 2b. TTSV2 — kokoro-server (improved voice, optional)
+
+[`TTSV2/`](TTSV2/) is a drop-in alternative to paroli backed by
+[kokoro-server](https://github.com/marty1885/kokoro-server) (Kokoro-82M). It
+listens on the **same** `services.tts` port (8766) and speaks the same protocol,
+so the LLM node reaches it unchanged — run **either** paroli **or** kokoro.
+
+```bash
+# a) build the C++ engine (auto-handles trixie vs bookworm Drogon)
+bash TTSV2/setup_kokoro.sh
+```
+
+⚠️ **Models are not downloadable.** kokoro's encoder/har/decoder ONNX, the RKNN
+decoder, and `voices_npy/` must be generated on an **x86 host** with
+`python3 build.py` (PyTorch + rknn-toolkit2 + Kokoro-82M weights), then copied to
+`TTSV2/kokoro-server/build/models/` (`onnx/`, `voices_npy/`, `config.json`). The
+setup script tells you exactly what's missing.
+
+```bash
+# b) once models are in place
+TTSV2/kokoro-server/build/run-kokoro-server.sh   # serves ws://127.0.0.1:8848
+cd TTSV2 && uv sync && uv run python voice_server.py
+uv run python test_tts.py --host 127.0.0.1
+```
+
+Voice/speed/rate are set under `ttsv2:` in [`config.yaml`](config.yaml).
+
 ## 3. Connector (test client, e.g. your laptop)
 
 ```bash
@@ -119,6 +146,7 @@ cd LLM && uv run python llm_server.py --tts-host 127.0.0.1
 |------------------------|--------------|-------------------|
 | `LLM/rkllama`          | LLM node     | active            |
 | `TTS/paroli`           | TTS node     | active            |
+| `TTSV2/kokoro-server`  | TTS node (v2)| active (optional) |
 | `STT/whisper`          | (future STT) | present, unused   |
 | `wakeword/openWakeWord`| (future)     | present, unused   |
 

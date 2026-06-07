@@ -17,36 +17,36 @@ Protocol to the laptop (one turn):
                    <binary frames>                     (raw PCM relayed from TTS node)
                    {"type":"done"}  |  {"type":"error","message":"..."}  |  {"type":"cleared"}
 
-Run:  python llm_server.py --model qwen2.5-3b --tts-host 100.x.x.x
-      (use --tts-host 127.0.0.1 to run the TTS node on this same board for testing)
+Run:  python llm_server.py                       # uses config.yaml
+      python llm_server.py --tts-host 127.0.0.1  # run TTS on this same board to test
 """
 
 import argparse
 import json
+import pathlib
 import queue
 import sys
 import threading
 
 import requests
 
-# --- Hardcoded layout (Tailscale) -------------------------------------------
-ROCK5C_IP = "100.108.158.94"   # this node; the laptop connects here
-LAPTOP_IP = "100.88.207.19"
-LLM_WS_PORT = 8765             # port the laptop connects to
-TTS_WS_PORT = 8766            # port of the TTS node
-LLM_URL = "http://127.0.0.1:8080"  # local rkllama server
+# Shared config lives at the repo root; this file is one level down (LLM/).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from config import load_config, service_addr  # noqa: E402
+
+# --- Layout from config.yaml ------------------------------------------------
+_CFG = load_config()
+_RKLLAMA_HOST, _RKLLAMA_PORT = service_addr("rkllama")
+LLM_URL = f"http://{_RKLLAMA_HOST}:{_RKLLAMA_PORT}"   # local rkllama server
+ROCK5C_IP, LLM_WS_PORT = service_addr("llm")          # this node; client connects here
+_TTS_HOST, TTS_WS_PORT = service_addr("tts")          # the TTS node
+
+DEFAULT_MODEL = _CFG["llm"]["model"]
+DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
 
 # --- Clause chunking --------------------------------------------------------
 HARD_BOUNDARIES = ".!?\n"
 SOFT_BOUNDARIES = ",;:"
-
-DEFAULT_SYSTEM = (
-    "You are a helpful voice assistant. Reply in a concise, natural, conversational "
-    "tone suitable for being read aloud. Your name is Aven. Write plain spoken sentences and keep special "
-    "characters to a minimum: avoid markdown and symbols such as *, #, _, backticks, or "
-    "bullet points, because they are read aloud literally. The only exception is when you "
-    "need to call a tool, where you may use the exact syntax the tool requires."
-)
 
 
 def extract_clauses(buffer, min_soft_len=18, max_len=120):
@@ -247,8 +247,8 @@ def main():
     parser = argparse.ArgumentParser(description="LLM node (Phase 3)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address for the laptop")
     parser.add_argument("--port", type=int, default=LLM_WS_PORT)
-    parser.add_argument("--model", default=None, help="rkllama model (default: auto)")
-    parser.add_argument("--tts-host", default="127.0.0.1",
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="rkllama model")
+    parser.add_argument("--tts-host", default=_TTS_HOST,
                         help="Address of the TTS node (the other Rock 5C). "
                              "Use 127.0.0.1 to run TTS on this same board.")
     parser.add_argument("--tts-port", type=int, default=TTS_WS_PORT)

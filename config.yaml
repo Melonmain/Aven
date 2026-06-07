@@ -1,0 +1,51 @@
+# Aven — service topology and settings.
+#
+# This single file is shared by every microservice (LLM orchestrator, TTS node,
+# and the connector test client). Each board has the whole repo checked out, so
+# every service reads this same file to learn where the others live.
+#
+# Tailscale IPs:
+#   main Rock 5C  (LLM + rkllama)  : 100.108.158.94
+#   TTS  Rock 5C  (TTS + paroli)   : 100.113.61.126
+
+services:
+  # LLM orchestrator — the endpoint the connector/laptop talks to.
+  # Runs on the main Rock 5C. Streams tokens from rkllama and relays clauses
+  # to the TTS node, forwarding PCM back to the client.
+  llm:
+    host: 100.108.158.94
+    port: 8765
+
+  # TTS node — runs on the second Rock 5C, fronts paroli-server (NPU).
+  tts:
+    host: 100.113.61.126
+    port: 8766
+
+  # rkllama LLM backend — local to the LLM board (NPU inference, OpenAI API).
+  rkllama:
+    host: 127.0.0.1
+    port: 8080
+
+  # paroli-server TTS backend — local to the TTS board (NPU VITS decoder).
+  paroli:
+    host: 127.0.0.1
+    port: 8848
+
+llm:
+  # Local model name as known to rkllama (the trailing segment of the pull path).
+  model: qwen2.5-3b
+  system_prompt: >-
+    You are a helpful voice assistant. Reply in a concise, natural,
+    conversational tone suitable for being read aloud. Your name is Aven. Write
+    plain spoken sentences and keep special characters to a minimum: avoid
+    markdown and symbols such as *, #, _, backticks, or bullet points, because
+    they are read aloud literally. The only exception is when you need to call a
+    tool, where you may use the exact syntax the tool requires.
+
+tts:
+  # Native PCM sample rate of the paroli/Piper model (Piper voices are 22050).
+  sample_rate: 22050
+  # Speaker id for multi-speaker models, or null for single-speaker.
+  speaker_id: null
+  # Speaking rate: >1 slower, <1 faster, null for the model default.
+  length_scale: null

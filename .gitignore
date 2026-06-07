@@ -9,3 +9,6 @@ __pycache__/
 # rkllama runtime artifacts (if a stray models/logs dir appears at root)
 /logs/
 /temp/
+
+# TTS smoke-test output
+test_output.wav

@@ -1,0 +1,14 @@
+[project]
+name = "aven-llm"
+version = "0.1.0"
+description = "Aven LLM orchestrator: streams rkllama NPU tokens, chunks into clauses, relays to the TTS node."
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=13",
+    "requests>=2.31",
+    "pyyaml>=6",
+]
+
+# App-style project: install the deps, but don't try to build this dir as a package.
+[tool.uv]
+package = false

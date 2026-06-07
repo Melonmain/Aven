@@ -1,0 +1,18 @@
+[project]
+name = "aven-connector"
+version = "0.1.0"
+description = "Aven test client: type a prompt, stream the spoken reply back from the LLM node."
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=13",
+    "pyyaml>=6",
+]
+
+# Real-time playback via PyAudio is optional; the client falls back to `aplay`.
+# Enable with: uv sync --extra audio   (needs system PortAudio headers)
+[project.optional-dependencies]
+audio = ["pyaudio>=0.2.14"]
+
+# App-style project: install the deps, but don't try to build this dir as a package.
+[tool.uv]
+package = false

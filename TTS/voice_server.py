@@ -28,12 +28,19 @@ Run:  python voice_server_paroli.py --paroli-host 127.0.0.1 --paroli-port 8848
 
 import argparse
 import json
+import pathlib
 import re
 import sys
 
-TTS_WS_PORT = 8766          # our port (what llm_server.py connects to)
-PAROLI_PORT = 8848          # default paroli-server port
-ROCK5C_TTS_IP = "100.108.158.94"   # board running this node (for the banner)
+# Shared config lives at the repo root; this file is one level down (TTS/).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from config import load_config, service_addr  # noqa: E402
+
+# --- Layout from config.yaml ------------------------------------------------
+_CFG = load_config()
+ROCK5C_TTS_IP, TTS_WS_PORT = service_addr("tts")        # this node (banner + port)
+_PAROLI_HOST, PAROLI_PORT = service_addr("paroli")      # local paroli-server
+_TTS_CFG = _CFG["tts"]
 
 # --- Speech sanitization (same as tts_server.py) ----------------------------
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
@@ -160,14 +167,14 @@ def main():
     parser = argparse.ArgumentParser(description="Paroli-backed TTS node (NPU)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address for the LLM node")
     parser.add_argument("--port", type=int, default=TTS_WS_PORT)
-    parser.add_argument("--paroli-host", default="127.0.0.1",
+    parser.add_argument("--paroli-host", default=_PAROLI_HOST,
                         help="Where paroli-server is running")
     parser.add_argument("--paroli-port", type=int, default=PAROLI_PORT)
-    parser.add_argument("--sample-rate", type=int, default=22050,
+    parser.add_argument("--sample-rate", type=int, default=_TTS_CFG["sample_rate"],
                         help="Native PCM rate of the Paroli model (Piper voices are 22050)")
-    parser.add_argument("--speaker-id", type=int, default=None,
+    parser.add_argument("--speaker-id", type=int, default=_TTS_CFG["speaker_id"],
                         help="Speaker id for multi-speaker models")
-    parser.add_argument("--length-scale", type=float, default=None,
+    parser.add_argument("--length-scale", type=float, default=_TTS_CFG["length_scale"],
                         help="Speaking rate (>1 slower, <1 faster)")
     args = parser.parse_args()
 

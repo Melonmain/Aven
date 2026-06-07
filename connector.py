@@ -20,8 +20,10 @@ import argparse
 import json
 import sys
 
-ROCK5C_IP = "100.108.158.94"   # Rock 5C running voice_server.py
-VOICE_PORT = 8765
+from config import service_addr
+
+# LLM orchestrator endpoint (the one service the laptop talks to).
+ROCK5C_IP, VOICE_PORT = service_addr("llm")
 
 CYAN = "\033[36m"
 GREEN = "\033[32m"

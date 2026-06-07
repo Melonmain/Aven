@@ -1,0 +1,14 @@
+# Python / UV
+.venv/
+__pycache__/
+*.pyc
+
+# UV lockfiles are per-service; keep them tracked for reproducible boards.
+# (u.lock files are intentionally NOT ignored.)
+
+# rkllama runtime artifacts (if a stray models/logs dir appears at root)
+/logs/
+/temp/
+
+# TTS smoke-test output
+test_output.wav

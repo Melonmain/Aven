@@ -1,0 +1,12 @@
+[submodule "TTS/paroli"]
+	path = TTS/paroli
+	url = https://github.com/marty1885/paroli.git
+[submodule "LLM/rkllama"]
+	path = LLM/rkllama
+	url = https://github.com/NotPunchnox/rkllama
+[submodule "STT/whisper"]
+	path = STT/whisper
+	url = https://github.com/openai/whisper.git
+[submodule "wakeword/openWakeWord"]
+	path = wakeword/openWakeWord
+	url = https://github.com/dscripka/openWakeWord.git

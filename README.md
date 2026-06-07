@@ -70,14 +70,23 @@ uv run python llm_server.py                  # serves ws://0.0.0.0:8765
 
 ## 2. TTS node (second Rock 5C — 100.113.61.126)
 
-```bash
-# a) paroli-server (build it once per the paroli README — C++ + RKNN models)
-TTS/paroli/...  --ip 0.0.0.0 --port 8848
+`paroli-server` is a C++ NPU engine. `setup_paroli.sh` builds it and fetches a
+voice in one shot (idempotent; prompts for sudo once for apt + the NPU runtime):
 
-# b) the TTS WebSocket node
+```bash
+# a) one-time build + voice download (default voice: ljspeech)
+bash TTS/setup_paroli.sh
+
+# b) start the NPU engine (wrapper sets LD_LIBRARY_PATH + model paths for you)
+TTS/paroli/build/run-paroli-server.sh         # serves ws://127.0.0.1:8848
+
+# c) the TTS WebSocket node
 cd TTS
 uv sync
 uv run python voice_server.py                # serves ws://0.0.0.0:8766
+
+# d) verify (writes test_output.wav)
+uv run python test_tts.py --host 127.0.0.1
 ```
 
 ## 3. Connector (test client, e.g. your laptop)

@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 #
-# start_main_board.sh — start/stop the services this Rock 5C (the LLM board)
-# hosts, as background daemons that survive an SSH disconnect:
+# start_main_board.sh — start/stop the Aven services on this Rock 5C as
+# background daemons that survive an SSH disconnect.
 #
-#   rkllama     :8080   NPU LLM backend          (LLM/rkllama/venv)
-#   llm_server  :8765   orchestrator (-> TTS)    (LLM/)
-#   stt         :8767   faster-whisper STT (CPU) (STT/)
+#   rkllama      :8080   NPU LLM backend            (LLM/rkllama/venv)
+#   llm_server   :8765   orchestrator (-> TTS board)(LLM/)
+#   stt          :8767   faster-whisper STT (CPU)   (STT/)
+#   coordinator  (proc)  voice loop: wakeword + mic + STT/LLM clients + speaker
+#                        playback (coordinator/) — needs a USB mic + speakers
 #
-# The TTS node lives on the OTHER board, and the coordinator is an interactive
-# client — neither is started here.
+# The TTS node lives on the OTHER board, so it isn't started here.
 #
 # Usage:
 #   ./start_main_board.sh [start|stop|status|restart] [service]
-#   ./start_main_board.sh                # start everything
+#   ./start_main_board.sh                  # start everything
 #   ./start_main_board.sh status
-#   ./start_main_board.sh restart stt    # just one service
+#   ./start_main_board.sh restart coordinator
 #
-# Logs + pids go to ./logs/ (gitignored).
+# Logs go to ./logs/ (gitignored).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,96 +27,115 @@ mkdir -p "$LOGDIR"
 RKLLAMA_DIR="$REPO/LLM/rkllama"
 RKLLAMA_MODELS="$(ls -d "$RKLLAMA_DIR"/venv/lib/python*/site-packages/rkllama/config/models 2>/dev/null | head -1)"
 
-# service order matters: rkllama must be ready before llm_server starts.
-SERVICES=(rkllama llm_server stt)
+# start order matters: backend before the coordinator that talks to it.
+SERVICES=(rkllama llm_server stt coordinator)
 
-svc_port()    { case "$1" in rkllama) echo 8080;; llm_server) echo 8765;; stt) echo 8767;; esac; }
-svc_dir()     { case "$1" in rkllama) echo "$RKLLAMA_DIR";; llm_server) echo "$REPO/LLM";; stt) echo "$REPO/STT";; esac; }
-svc_cmd()     {
+svc_kind() { case "$1" in coordinator) echo proc;; *) echo port;; esac; }
+svc_port() { case "$1" in rkllama) echo 8080;; llm_server) echo 8765;; stt) echo 8767;; *) echo "";; esac; }
+svc_dir()  { case "$1" in rkllama) echo "$RKLLAMA_DIR";; llm_server) echo "$REPO/LLM";; stt) echo "$REPO/STT";; coordinator) echo "$REPO/coordinator";; esac; }
+svc_pat()  { case "$1" in coordinator) echo "coordinator.py";; esac; }   # proc match
+svc_cmd()  {
   case "$1" in
-    rkllama)    echo "$RKLLAMA_DIR/venv/bin/rkllama_server --models $RKLLAMA_MODELS";;
-    llm_server) echo "uv run python llm_server.py";;
-    stt)        echo "uv run python stt_server.py";;
+    rkllama)     echo "$RKLLAMA_DIR/venv/bin/rkllama_server --models $RKLLAMA_MODELS";;
+    llm_server)  echo "uv run python llm_server.py";;
+    stt)         echo "uv run python stt_server.py";;
+    coordinator) echo "uv run python coordinator.py";;
   esac
 }
 
 C_G="\033[32m"; C_R="\033[31m"; C_Y="\033[33m"; C_0="\033[0m"
 
-port_up() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
+port_up()  { ss -ltn 2>/dev/null | grep -q ":$1 "; }
+pid_port() { ss -ltnp 2>/dev/null | grep ":$1 " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
 
-pid_on_port() { ss -ltnp 2>/dev/null | grep ":$1 " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
+is_running() {
+  local name=$1
+  if [ "$(svc_kind "$name")" = port ]; then port_up "$(svc_port "$name")"
+  else pgrep -f "$(svc_pat "$name")" >/dev/null 2>&1; fi
+}
+pids_of() {
+  local name=$1
+  { if [ "$(svc_kind "$name")" = port ]; then pid_port "$(svc_port "$name")"
+    else pgrep -f "$(svc_pat "$name")" 2>/dev/null; fi; } || true
+}
 
-wait_port() {  # name port timeout_s
-  local name=$1 port=$2 t=${3:-30} i=0
-  while ! port_up "$port"; do
-    sleep 1; i=$((i+1))
-    if [ "$i" -ge "$t" ]; then
-      printf "${C_R}failed (see logs/%s.log)${C_0}\n" "$name"
-      tail -n 5 "$LOGDIR/$name.log" 2>/dev/null | sed 's/^/      /'
-      return 1
-    fi
-  done
-  printf "${C_G}up${C_0}\n"
+mic_present() { arecord -l 2>/dev/null | grep -q '^card'; }
+
+launch() {  # name
+  local name=$1 dir cmd
+  dir=$(svc_dir "$name"); cmd=$(svc_cmd "$name")
+  # setsid + </dev/null fully detaches so it survives this shell / SSH closing.
+  # PYTHONUNBUFFERED keeps the logs live (python block-buffers stdout to a file).
+  ( cd "$dir" && PYTHONUNBUFFERED=1 setsid bash -c "exec $cmd" >"$LOGDIR/$name.log" 2>&1 </dev/null & )
 }
 
 start_one() {
-  local name=$1 port dir cmd
-  port=$(svc_port "$name"); dir=$(svc_dir "$name"); cmd=$(svc_cmd "$name")
-  if port_up "$port"; then
-    printf "  ${C_Y}[skip]${C_0}  %-11s already running on :%s\n" "$name" "$port"
-    return 0
+  local name=$1
+  if is_running "$name"; then
+    printf "  ${C_Y}[skip]${C_0}  %-11s already running\n" "$name"; return 0
   fi
-  printf "  [start] %-11s :%s … " "$name" "$port"
-  # setsid + </dev/null detaches fully so it survives this shell / SSH closing.
-  ( cd "$dir" && setsid bash -c "exec $cmd" >"$LOGDIR/$name.log" 2>&1 </dev/null & )
-  # rkllama must answer /models before llm_server (which queries it at startup).
-  if [ "$name" = "rkllama" ]; then
-    wait_port "$name" "$port" 60 || return 1
+  if [ "$name" = coordinator ] && ! mic_present; then
+    printf "  ${C_Y}[skip]${C_0}  %-11s no capture device — connect the USB mic, then: %s start coordinator\n" \
+           "$name" "$0"; return 0
+  fi
+  printf "  [start] %-11s … " "$name"
+  launch "$name"
+  if [ "$(svc_kind "$name")" = port ]; then
+    local port; port=$(svc_port "$name")
+    local t=40; [ "$name" = rkllama ] && t=60
     local i=0
-    until curl -fsS "http://127.0.0.1:$port/models" >/dev/null 2>&1; do
-      sleep 1; i=$((i+1)); [ "$i" -ge 30 ] && break
+    while ! port_up "$port"; do
+      sleep 1; i=$((i+1))
+      if [ "$i" -ge "$t" ]; then
+        printf "${C_R}failed (logs/%s.log)${C_0}\n" "$name"
+        tail -n 5 "$LOGDIR/$name.log" 2>/dev/null | sed 's/^/      /'; return 1
+      fi
     done
+    # rkllama must answer /models before llm_server starts.
+    if [ "$name" = rkllama ]; then
+      i=0; until curl -fsS "http://127.0.0.1:$port/models" >/dev/null 2>&1; do
+        sleep 1; i=$((i+1)); [ "$i" -ge 30 ] && break; done
+    fi
+    printf "${C_G}up${C_0} (:%s)\n" "$port"
   else
-    wait_port "$name" "$port" 40 || return 1
+    sleep 3
+    if is_running "$name"; then printf "${C_G}up${C_0}\n"
+    else printf "${C_R}exited (logs/%s.log)${C_0}\n" "$name"
+         tail -n 5 "$LOGDIR/$name.log" 2>/dev/null | sed 's/^/      /'; fi
   fi
 }
 
 stop_one() {
-  local name=$1 port pid
-  port=$(svc_port "$name"); pid=$(pid_on_port "$port")
-  if [ -z "$pid" ]; then
-    printf "  ${C_Y}[skip]${C_0}  %-11s not running\n" "$name"; return 0
-  fi
-  printf "  [stop]  %-11s :%s (pid %s) … " "$name" "$port" "$pid"
-  kill "$pid" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do port_up "$port" || break; sleep 1; done
-  port_up "$port" && { kill -9 "$pid" 2>/dev/null || true; sleep 1; }
-  port_up "$port" && printf "${C_R}still up${C_0}\n" || printf "${C_G}stopped${C_0}\n"
+  local name=$1 pids
+  pids=$(pids_of "$name")
+  if [ -z "$pids" ]; then printf "  ${C_Y}[skip]${C_0}  %-11s not running\n" "$name"; return 0; fi
+  printf "  [stop]  %-11s (pid %s) … " "$name" "$(echo "$pids" | tr '\n' ' ' | sed 's/ $//')"
+  echo "$pids" | xargs -r kill 2>/dev/null || true
+  for _ in 1 2 3 4 5; do is_running "$name" || break; sleep 1; done
+  is_running "$name" && { pids_of "$name" | xargs -r kill -9 2>/dev/null || true; sleep 1; }
+  is_running "$name" && printf "${C_R}still up${C_0}\n" || printf "${C_G}stopped${C_0}\n"
 }
 
 status_one() {
-  local name=$1 port pid; port=$(svc_port "$name"); pid=$(pid_on_port "$port")
-  if [ -n "$pid" ]; then
-    printf "  %-11s ${C_G}● up${C_0}   :%s  pid %s\n" "$name" "$port" "$pid"
-  else
-    printf "  %-11s ${C_R}○ down${C_0} :%s\n" "$name" "$port"
-  fi
+  local name=$1 pids extra=""
+  pids=$(pids_of "$name" | tr '\n' ',' | sed 's/,$//')
+  [ "$(svc_kind "$name")" = port ] && extra=" :$(svc_port "$name")"
+  if [ -n "$pids" ]; then printf "  %-11s ${C_G}● up${C_0}  %s pid %s\n" "$name" "$extra" "$pids"
+  else printf "  %-11s ${C_R}○ down${C_0}%s\n" "$name" "$extra"; fi
 }
 
-action="${1:-start}"
-filter="${2:-}"
-targets=("${SERVICES[@]}")
-[ -n "$filter" ] && targets=("$filter")
+action="${1:-start}"; filter="${2:-}"
+targets=("${SERVICES[@]}"); [ -n "$filter" ] && targets=("$filter")
 
 case "$action" in
-  start)   echo "Starting Aven services on this board:";     for s in "${targets[@]}"; do start_one "$s"; done ;;
-  stop)    echo "Stopping Aven services:";  for s in "${targets[@]}"; do stop_one "$s"; done ;;
-  restart) echo "Restarting Aven services:";
+  start)   echo "Starting Aven services on this board:"; for s in "${targets[@]}"; do start_one "$s"; done ;;
+  stop)    echo "Stopping Aven services:"; for s in "${targets[@]}"; do stop_one "$s"; done ;;
+  restart) echo "Restarting Aven services:"
            for s in "${targets[@]}"; do stop_one "$s"; done
            for s in "${targets[@]}"; do start_one "$s"; done ;;
   status)  echo "Aven services on this board:"; for s in "${SERVICES[@]}"; do status_one "$s"; done ;;
   *) echo "usage: $0 [start|stop|status|restart] [service]" >&2; exit 2 ;;
 esac
 
-[ "$action" != "status" ] && { echo; echo "Logs: $LOGDIR/<service>.log   ·   status: $0 status"; }
+[ "$action" != status ] && { echo; echo "Logs: $LOGDIR/<service>.log   ·   status: $0 status"; }
 exit 0

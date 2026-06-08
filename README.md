@@ -233,20 +233,42 @@ recording behaviour (silence timeout, etc.) live under `wakeword:` /
 
 ## Running the main board as daemons
 
-[`start_main_board.sh`](start_main_board.sh) starts the three services this board
-hosts — **rkllama** (:8080), **llm_server** (:8765), **stt** (:8767) — as
-background daemons that survive an SSH disconnect (logs in `logs/`). It waits for
-rkllama to be ready before launching the orchestrator, and is idempotent.
+[`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as
+background daemons that survive an SSH disconnect (logs in `logs/`, unbuffered):
+
+| Service | Port | Notes |
+|---|---|---|
+| `rkllama` | 8080 | NPU LLM backend |
+| `llm_server` | 8765 | orchestrator → TTS board |
+| `stt` | 8767 | faster-whisper (CPU) |
+| `coordinator` | — | voice loop: **wakeword + mic + playback** (needs USB mic/speakers) |
+
+It starts them in order (waiting for rkllama's `/models` before the orchestrator),
+is idempotent, and tracks the coordinator by process (it has no port).
 
 ```bash
 ./start_main_board.sh            # start everything (skips what's already up)
 ./start_main_board.sh status
-./start_main_board.sh restart stt
+./start_main_board.sh restart coordinator
 ./start_main_board.sh stop
 ```
 
-(The TTS node runs on the other board; the coordinator is an interactive client —
-neither is started here.)
+The TTS node runs on the other board, so it isn't started here.
+
+### USB mic + speakers
+
+The coordinator needs PortAudio and an audio device:
+
+```bash
+sudo apt install -y libportaudio2          # one-time
+# plug in the USB mic + speakers, then list devices:
+cd coordinator && uv run python coordinator.py --list-devices
+```
+
+Set `coordinator.input_device` / `output_device` in [`config.yaml`](config.yaml) to
+the USB device's index or a unique part of its name (default `null` = system
+default), then `./start_main_board.sh restart coordinator`. If no capture device
+is present, the script skips the coordinator and starts the rest.
 
 ## Configuration
 

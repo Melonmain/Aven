@@ -97,6 +97,11 @@ coordinator:
   silence_timeout: 0.8       # stop recording after this much trailing silence
   min_record_seconds: 0.3    # ignore blips shorter than this
   energy_threshold: 500      # int16 RMS below this counts as silence
+  # USB mic / speakers: null = system default. Once the USB devices are plugged
+  # in, set these to the device index or a unique part of its name. List devices
+  # with: cd coordinator && uv run python coordinator.py --list-devices
+  input_device: null         # e.g. "USB" or 3   (the USB microphone)
+  output_device: null        # e.g. "USB" or 4   (the USB speakers)
 
 # TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
 # TTSV3/voice_server.py listens on the same `services.tts` port (8766). The

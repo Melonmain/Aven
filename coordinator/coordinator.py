@@ -47,8 +47,9 @@ FRAME = 1280  # 80 ms @ 16 kHz
 # Speaker playback (sounddevice, opened lazily at the rate the LLM/TTS sends)
 # --------------------------------------------------------------------------- #
 class Player:
-    def __init__(self, enabled):
+    def __init__(self, enabled, device=None):
         self.enabled = enabled
+        self.device = device
         self._sd = None
         self._stream = None
         self._rate = None
@@ -66,7 +67,7 @@ class Player:
         if self._stream is None or self._rate != rate:
             self._close_stream()
             self._stream = self._sd.RawOutputStream(
-                samplerate=rate, channels=1, dtype="int16")
+                samplerate=rate, channels=1, dtype="int16", device=self.device)
             self._stream.start()
             self._rate = rate
 
@@ -168,7 +169,7 @@ def record_utterance(stream, cc):
     return b"".join(frames)
 
 
-def wake_loop(stt_url, llm_url, model_name, threshold, cc, player):
+def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=None):
     import sounddevice as sd
     from openwakeword.model import Model
 
@@ -181,7 +182,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player):
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
           f"(Ctrl+C to quit)")
     with sd.RawInputStream(samplerate=RATE, blocksize=FRAME, dtype="int16",
-                           channels=1) as stream:
+                           channels=1, device=input_device) as stream:
         while True:
             data, _ = stream.read(FRAME)
             frame = np.frombuffer(bytes(data), dtype=np.int16)
@@ -210,17 +211,36 @@ def main():
     ww = _CFG["wakeword"]
     cc = _CFG["coordinator"]
 
+    def _dev(v):  # accept a device index (int) or a name substring (str)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return v
+
     p = argparse.ArgumentParser(description="Aven coordinator (full voice loop)")
     p.add_argument("--text", help="Skip mic+STT; send this text to the LLM")
     p.add_argument("--wav", help="Skip mic+wakeword; transcribe this WAV via STT")
     p.add_argument("--no-audio", action="store_true", help="Don't play the reply")
     p.add_argument("--model", default=ww["model"], help="Wakeword model name")
     p.add_argument("--threshold", type=float, default=ww["threshold"])
+    p.add_argument("--input-device", default=cc.get("input_device"),
+                   help="Mic device (index or name substring); default = system default")
+    p.add_argument("--output-device", default=cc.get("output_device"),
+                   help="Speaker device (index or name substring); default = system default")
+    p.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     args = p.parse_args()
+
+    if args.list_devices:
+        import sounddevice as sd
+        print(sd.query_devices())
+        return 0
 
     stt_url = f"ws://{stt_host}:{stt_port}"
     llm_url = f"ws://{llm_host}:{llm_port}"
-    player = Player(enabled=not args.no_audio)
+    in_dev, out_dev = _dev(args.input_device), _dev(args.output_device)
+    player = Player(enabled=not args.no_audio, device=out_dev)
     print(f"  STT : {stt_url}\n  LLM : {llm_url}")
 
     try:
@@ -237,7 +257,7 @@ def main():
             if text.strip():
                 converse(llm_url, text, player)
         else:
-            wake_loop(stt_url, llm_url, args.model, args.threshold, cc, player)
+            wake_loop(stt_url, llm_url, args.model, args.threshold, cc, player, in_dev)
     except KeyboardInterrupt:
         print()
     finally:

@@ -31,6 +31,7 @@ import time
 import wave
 
 import numpy as np
+import soxr
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from config import load_config, service_addr  # noqa: E402
@@ -52,7 +53,8 @@ class Player:
         self.device = device
         self._sd = None
         self._stream = None
-        self._rate = None
+        self._src_rate = None     # rate of the PCM we're handed
+        self._dev_rate = None     # rate the device actually runs at
         self._channels = 1
         if enabled:
             try:
@@ -63,32 +65,39 @@ class Player:
                 self.enabled = False
 
     def begin(self, rate):
+        """Note the source PCM rate; open the device once at ITS native rate.
+
+        USB speakers are usually 44.1/48 kHz only, so we resample our 16/22/24 kHz
+        audio up to the device rate in write() rather than asking it for a rate it
+        can't do (which silently produces nothing on the raw ALSA device).
+        """
         if not self.enabled:
             return
-        if self._stream is None or self._rate != rate:
-            self._close_stream()
-            # Match the device's channel count (USB speakers are often stereo-only);
-            # mono PCM is duplicated across channels in write().
-            self._channels = 1
+        self._src_rate = rate
+        if self._stream is None:
+            self._channels, self._dev_rate = 1, rate
             if self.device is not None:
                 try:
-                    mc = int(self._sd.query_devices(self.device)["max_output_channels"])
-                    self._channels = min(max(mc, 1), 2)
+                    info = self._sd.query_devices(self.device)
+                    self._channels = min(max(int(info["max_output_channels"]), 1), 2)
+                    self._dev_rate = int(info["default_samplerate"])
                 except Exception:
-                    self._channels = 1
+                    self._channels, self._dev_rate = 1, rate
             self._stream = self._sd.RawOutputStream(
-                samplerate=rate, channels=self._channels, dtype="int16",
+                samplerate=self._dev_rate, channels=self._channels, dtype="int16",
                 device=self.device)
             self._stream.start()
-            self._rate = rate
 
     def write(self, pcm):
         if not (self.enabled and self._stream):
             return
+        mono = np.frombuffer(pcm, dtype=np.int16)
+        if self._src_rate != self._dev_rate:         # resample to the device rate
+            r = soxr.resample(mono.astype(np.float32), self._src_rate, self._dev_rate)
+            mono = np.clip(r, -32768, 32767).astype(np.int16)
         if self._channels > 1:                       # mono -> interleaved N-channel
-            mono = np.frombuffer(pcm, dtype=np.int16)
-            pcm = np.repeat(mono[:, None], self._channels, axis=1).ravel().tobytes()
-        self._stream.write(pcm)
+            mono = np.repeat(mono[:, None], self._channels, axis=1).ravel()
+        self._stream.write(mono.tobytes())
 
     def beep(self, freq=880, ms=140, volume=0.3):
         """Play a short sine 'I heard you' tone through the speaker."""

@@ -33,7 +33,6 @@ SERVICES=(rkllama llm_server stt coordinator)
 svc_kind() { case "$1" in coordinator) echo proc;; *) echo port;; esac; }
 svc_port() { case "$1" in rkllama) echo 8080;; llm_server) echo 8765;; stt) echo 8767;; *) echo "";; esac; }
 svc_dir()  { case "$1" in rkllama) echo "$RKLLAMA_DIR";; llm_server) echo "$REPO/LLM";; stt) echo "$REPO/STT";; coordinator) echo "$REPO/coordinator";; esac; }
-svc_pat()  { case "$1" in coordinator) echo "coordinator.py";; esac; }   # proc match
 svc_cmd()  {
   case "$1" in
     rkllama)     echo "$RKLLAMA_DIR/venv/bin/rkllama_server --models $RKLLAMA_MODELS";;
@@ -46,27 +45,35 @@ svc_cmd()  {
 C_G="\033[32m"; C_R="\033[31m"; C_Y="\033[33m"; C_0="\033[0m"
 
 port_up()  { ss -ltn 2>/dev/null | grep -q ":$1 "; }
-pid_port() { ss -ltnp 2>/dev/null | grep ":$1 " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
+pid_port() { ss -ltnp 2>/dev/null | grep ":$1 " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true; }
+
+# proc services are tracked by a pidfile holding the setsid session-leader pid
+# (so we never pgrep a command line — which could match an unrelated process).
+pidfile()  { echo "$LOGDIR/$1.pid"; }
+proc_pid() { local f; f=$(pidfile "$1"); [ -f "$f" ] && cat "$f" 2>/dev/null || true; }
 
 is_running() {
   local name=$1
   if [ "$(svc_kind "$name")" = port ]; then port_up "$(svc_port "$name")"
-  else pgrep -f "$(svc_pat "$name")" >/dev/null 2>&1; fi
+  else local p; p=$(proc_pid "$name"); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; fi
 }
 pids_of() {
   local name=$1
-  { if [ "$(svc_kind "$name")" = port ]; then pid_port "$(svc_port "$name")"
-    else pgrep -f "$(svc_pat "$name")" 2>/dev/null; fi; } || true
+  if [ "$(svc_kind "$name")" = port ]; then pid_port "$(svc_port "$name")"
+  else is_running "$name" && proc_pid "$name"; fi
+  return 0
 }
 
 mic_present() { arecord -l 2>/dev/null | grep -q '^card'; }
 
 launch() {  # name
-  local name=$1 dir cmd
-  dir=$(svc_dir "$name"); cmd=$(svc_cmd "$name")
+  local name=$1 dir cmd pidf
+  dir=$(svc_dir "$name"); cmd=$(svc_cmd "$name"); pidf=$(pidfile "$name")
   # setsid + </dev/null fully detaches so it survives this shell / SSH closing.
-  # PYTHONUNBUFFERED keeps the logs live (python block-buffers stdout to a file).
-  ( cd "$dir" && PYTHONUNBUFFERED=1 setsid bash -c "exec $cmd" >"$LOGDIR/$name.log" 2>&1 </dev/null & )
+  # The new session leader records its own pid (= process-group id) so stop can
+  # signal the whole group. PYTHONUNBUFFERED keeps logs live.
+  ( cd "$dir" && PYTHONUNBUFFERED=1 setsid bash -c "echo \$\$ > '$pidf'; exec $cmd" \
+      >"$LOGDIR/$name.log" 2>&1 </dev/null & )
 }
 
 start_one() {
@@ -106,14 +113,20 @@ start_one() {
 }
 
 stop_one() {
-  local name=$1 pids
-  pids=$(pids_of "$name")
-  if [ -z "$pids" ]; then printf "  ${C_Y}[skip]${C_0}  %-11s not running\n" "$name"; return 0; fi
-  printf "  [stop]  %-11s (pid %s) … " "$name" "$(echo "$pids" | tr '\n' ' ' | sed 's/ $//')"
-  echo "$pids" | xargs -r kill 2>/dev/null || true
+  local name=$1 kind pid
+  kind=$(svc_kind "$name")
+  if ! is_running "$name"; then printf "  ${C_Y}[skip]${C_0}  %-11s not running\n" "$name"; return 0; fi
+  if [ "$kind" = port ]; then pid=$(pid_port "$(svc_port "$name")"); else pid=$(proc_pid "$name"); fi
+  printf "  [stop]  %-11s (pid %s) … " "$name" "$pid"
+  if [ "$kind" = proc ]; then kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  else kill "$pid" 2>/dev/null || true; fi
   for _ in 1 2 3 4 5; do is_running "$name" || break; sleep 1; done
-  is_running "$name" && { pids_of "$name" | xargs -r kill -9 2>/dev/null || true; sleep 1; }
-  is_running "$name" && printf "${C_R}still up${C_0}\n" || printf "${C_G}stopped${C_0}\n"
+  if is_running "$name"; then
+    [ "$kind" = proc ] && kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  if is_running "$name"; then printf "${C_R}still up${C_0}\n"
+  else [ "$kind" = proc ] && rm -f "$(pidfile "$name")"; printf "${C_G}stopped${C_0}\n"; fi
 }
 
 status_one() {

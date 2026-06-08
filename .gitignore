@@ -12,3 +12,6 @@ __pycache__/
 
 # TTS smoke-test output
 test_output.wav
+
+# Piper voices (downloaded by TTSV3/setup_piper.sh; large)
+TTSV3/voices/

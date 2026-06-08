@@ -124,6 +124,27 @@ uv run python test_tts.py --host 127.0.0.1
 
 Voice/speed/rate are set under `ttsv2:` in [`config.yaml`](config.yaml).
 
+### 2c. TTSV3 — Piper (CPU, simplest, optional)
+
+[`TTSV3/`](TTSV3/) is the simplest TTS: vanilla [Piper](https://github.com/OHF-Voice/piper1-gpl)
+running **in-process on the CPU** (no submodule, no C++ build, no NPU). It listens
+on the same `services.tts` port (8766) and speaks the same protocol, so it's a
+drop-in for paroli/kokoro — handy as a fallback or on a board without a free NPU.
+
+```bash
+# a) sync the venv and download a voice (default: en_US-lessac-medium)
+bash TTSV3/setup_piper.sh
+
+# b) run it (synthesizes in-process — no separate backend)
+cd TTSV3 && uv run python voice_server.py
+
+# c) verify (writes test_output.wav)
+uv run python test_tts.py --host 127.0.0.1
+```
+
+Voice/length-scale/speaker are set under `ttsv3:` in [`config.yaml`](config.yaml);
+browse voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+
 ## 3. Connector (test client, e.g. your laptop)
 
 ```bash

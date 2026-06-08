@@ -66,3 +66,14 @@ ttsv2:
   speed: 1.0
   # Kokoro-82M native PCM rate.
   sample_rate: 24000
+
+# TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
+# TTSV3/voice_server.py listens on the same `services.tts` port (8766). The
+# sample rate is read from the voice itself. Run only one TTS variant at a time.
+ttsv3:
+  # Piper voice name; downloaded by setup_piper.sh into TTSV3/voices/.
+  voice: en_US-lessac-medium
+  # Speaking rate: >1 slower, <1 faster, null = the voice default.
+  length_scale: null
+  # Speaker id for multi-speaker voices, or null.
+  speaker_id: null

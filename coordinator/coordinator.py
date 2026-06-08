@@ -25,6 +25,7 @@ Run:
 
 import argparse
 import json
+import logging
 import pathlib
 import sys
 import time
@@ -38,6 +39,8 @@ from config import load_config, service_addr  # noqa: E402
 
 CYAN, GREEN, RED, YELLOW, BOLD, RESET = (
     "\033[36m", "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m")
+
+log = logging.getLogger("aven")
 
 _CFG = load_config()
 RATE = 16000
@@ -137,41 +140,79 @@ class Player:
 def transcribe(stt_url, pcm_bytes, rate):
     """Send PCM to the STT service and return the transcript text."""
     from websockets.sync.client import connect
+    audio_s = len(pcm_bytes) / 2 / rate
+    t0 = time.perf_counter()
     with connect(stt_url, max_size=None, open_timeout=10) as ws:
         ws.send(json.dumps({"command": "config", "sample_rate": rate}))
         for i in range(0, len(pcm_bytes), 32000):
             ws.send(pcm_bytes[i:i + 32000])
         ws.send(json.dumps({"command": "transcribe"}))
         result = json.loads(ws.recv())
-    return result.get("text", "")
+    text = result.get("text", "")
+    log.info("STT  : %.0f ms for %.1fs audio -> %r", (time.perf_counter() - t0) * 1000,
+             audio_s, text)
+    return text
 
 
 def converse(llm_url, text, player):
-    """Send text to the LLM node; stream the transcript and play the audio."""
+    """Send text to the LLM node; stream the transcript and play the audio.
+
+    Logs what the LLM/TTS node streams back (transcript, audio_start params, PCM
+    chunk/byte counts) and the latency of each milestone.
+    """
     from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed
+
+    t0 = time.perf_counter()
+    ms = lambda t: (t - t0) * 1000
+    first_tok = first_audio = done_t = None
+    chunks = nbytes = 0
+    rate = ch = width = None
+
     with connect(llm_url, max_size=None) as ws:
         ws.send(json.dumps({"text": text}))
+        log.info("LLM  : sent prompt (%d chars)", len(text))
         sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
         sys.stdout.flush()
         try:
             for message in ws:
                 if isinstance(message, (bytes, bytearray)):
+                    if first_audio is None:
+                        first_audio = time.perf_counter()
+                        log.info("TTS  : first audio chunk @ %.0f ms", ms(first_audio))
+                    chunks += 1
+                    nbytes += len(message)
                     player.write(message)
                     continue
                 event = json.loads(message)
                 etype = event.get("type")
                 if etype == "audio_start":
-                    player.begin(event["sample_rate"])
+                    rate = event.get("sample_rate"); ch = event.get("channels")
+                    width = event.get("sample_width")
+                    log.info("TTS  : audio_start %s Hz, %s ch, %s-byte samples @ %.0f ms",
+                             rate, ch, width, ms(time.perf_counter()))
+                    player.begin(rate)
                 elif etype == "llm":
+                    if first_tok is None:
+                        first_tok = time.perf_counter()
+                        log.info("LLM  : first token @ %.0f ms", ms(first_tok))
                     sys.stdout.write(event["text"]); sys.stdout.flush()
                 elif etype == "error":
+                    log.warning("server error: %s", event.get("message"))
                     print(f"\n{RED}server error: {event.get('message')}{RESET}")
                 elif etype == "done":
+                    done_t = time.perf_counter()
                     break
         except ConnectionClosed:
             print(f"\n{RED}LLM connection closed.{RESET}")
     print()
+
+    audio_s = nbytes / 2 / rate if rate else 0.0
+    log.info("TTS  : received %d PCM chunks, %d bytes (~%.2fs audio)", chunks, nbytes, audio_s)
+    log.info("LLM/TTS done @ %.0f ms (first_token %.0f ms, first_audio %.0f ms)",
+             ms(done_t) if done_t else 0, ms(first_tok) if first_tok else 0,
+             ms(first_audio) if first_audio else 0)
+    return {"total_s": (done_t - t0) if done_t else 0.0, "audio_s": audio_s}
 
 
 # --------------------------------------------------------------------------- #
@@ -247,19 +288,27 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
         while True:
             frame = read_mono(stream, channels)
             if _score_of(model.predict(frame), model_name) >= threshold:
+                t_wake = time.perf_counter()
+                log.info("WAKE : '%s' detected", model_name)
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
                 player.beep()
                 pcm = record_utterance(stream, cc, channels)
+                log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured",
+                         time.perf_counter() - t_wake, len(pcm) / 2 / RATE)
                 try:
                     text = transcribe(stt_url, pcm, RATE)
                 except Exception as exc:  # noqa: BLE001
+                    log.warning("STT error: %s", exc)
                     print(f"{RED}STT error: {exc}{RESET}"); continue
                 print(f"{CYAN}You:{RESET} {text}")
                 if text.strip():
                     try:
                         converse(llm_url, text, player)
                     except Exception as exc:  # noqa: BLE001
+                        log.warning("LLM error: %s", exc)
                         print(f"{RED}LLM error: {exc}{RESET}")
+                log.info("TURN : total %.2fs (wake -> reply done)",
+                         time.perf_counter() - t_wake)
                 if hasattr(model, "reset"):
                     model.reset()   # avoid re-triggering on the same audio
                 print(f"{GREEN}listening…{RESET}", flush=True)
@@ -292,6 +341,10 @@ def main():
                    help="Speaker device (index or name substring); default = system default")
     p.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     args = p.parse_args()
+
+    # Timestamped logs to stdout (the daemon redirects this to logs/coordinator.log).
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s",
+                        datefmt="%H:%M:%S", stream=sys.stdout)
 
     if args.list_devices:
         import sounddevice as sd

@@ -1,0 +1,16 @@
+[project]
+name = "aven-stt"
+version = "0.1.0"
+description = "Aven STT node: faster-whisper speech-to-text on the CPU, over WebSocket."
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.1",
+    "websockets>=13",
+    "pyyaml>=6",
+    "numpy>=1.26",
+    "soxr>=0.5",
+]
+
+# App-style project: install the deps, but don't try to build this dir as a package.
+[tool.uv]
+package = false

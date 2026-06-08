@@ -1,9 +1,15 @@
 # Aven — Rockchip-based AI Assistant
 
 A voice-assistant pipeline built as **microservices** so each stage can run on
-its own Rock 5C and use the **NPU**. Right now only the **LLM** and **TTS**
-stages are wired up; STT (whisper) and wakeword (openWakeWord) are present as
-submodules for later.
+its own Rock 5C and use the **NPU** (LLM, TTS) or the **CPU** (STT, wakeword).
+The **LLM** and **TTS** stages are wired end-to-end; the **STT** (faster-whisper)
+and **wakeword** (openWakeWord) stages exist as standalone CPU services and are
+being wired into the full voice loop:
+
+```
+  mic ─▶ wakeword (CPU) ─▶ STT (CPU) ─▶ LLM (NPU) ─▶ TTS (NPU/CPU) ─▶ speaker
+       "hey jarvis"      faster-whisper   rkllama      paroli/kokoro/piper
+```
 
 ```
   connector (laptop)
@@ -36,6 +42,8 @@ submodules for later.
 | `LLM/rkllama/`       | NPU LLM backend (submodule)              | `LLM/rkllama/`    |
 | `TTS/voice_server.py`| TTS node (second Rock 5C)                | `TTS/`            |
 | `TTS/paroli/`        | NPU TTS backend (submodule, C++)         | built separately  |
+| `STT/stt_server.py`  | STT node (faster-whisper, CPU)           | `STT/`            |
+| `wakeword/wakeword_listener.py` | Wakeword (openWakeWord, CPU)  | `wakeword/`       |
 
 Every service reads the **single `config.yaml`** at the repo root, so there are
 no hardcoded IPs in the code. Change a host/port once, everywhere picks it up.
@@ -145,7 +153,48 @@ uv run python test_tts.py --host 127.0.0.1
 Voice/length-scale/speaker are set under `ttsv3:` in [`config.yaml`](config.yaml);
 browse voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
 
-## 3. Connector (test client, e.g. your laptop)
+## 3. Voice input — STT + wakeword (CPU)
+
+These two run on the **CPU** (no NPU), so they can live on any board — including
+the LLM board alongside rkllama. They're standalone services today; wiring them
+into the full mic→LLM loop is the next step.
+
+### 3a. STT — faster-whisper
+
+[`STT/`](STT/) transcribes speech to text with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8 on
+CPU — much lighter than `openai-whisper`; the `STT/whisper` submodule stays as
+upstream reference). A client streams an utterance as PCM and gets back text.
+
+```bash
+bash STT/setup_stt.sh                       # uv sync + pre-download the model
+cd STT && uv run python stt_server.py        # serves ws://0.0.0.0:8767
+# verify with any 16-bit mono WAV:
+uv run python test_stt.py --host 127.0.0.1 --wav /path/to/speech.wav
+```
+
+Model/language/compute-type live under `stt:` in [`config.yaml`](config.yaml)
+(default `base.en`, int8). Audio at any rate is resampled to 16 kHz.
+
+### 3b. Wakeword — openWakeWord
+
+[`wakeword/`](wakeword/) listens for a wake phrase with
+[openWakeWord](https://github.com/dscripka/openWakeWord) (ONNX on CPU). The
+default phrase is the pretrained **"hey jarvis"** model, downloaded on setup.
+
+```bash
+bash wakeword/setup_wakeword.sh             # uv sync + download the model
+# test over a WAV (no mic needed):
+cd wakeword && uv run python wakeword_listener.py --wav /path/to/clip.wav
+# live mic (needs PortAudio):
+sudo apt install -y libportaudio2
+uv sync --extra mic && uv run python wakeword_listener.py
+```
+
+Phrase/threshold live under `wakeword:` in [`config.yaml`](config.yaml); other
+phrases (`alexa`, `hey_mycroft`, …) are downloaded on demand.
+
+## 4. Connector (test client, e.g. your laptop)
 
 ```bash
 uv sync                 # add `--extra audio` for PyAudio; otherwise falls back to aplay
@@ -172,8 +221,8 @@ cd LLM && uv run python llm_server.py --tts-host 127.0.0.1
 | `LLM/rkllama`          | LLM node     | active            |
 | `TTS/paroli`           | TTS node     | active            |
 | `TTSV2/kokoro-server`  | TTS node (v2)| active (optional) |
-| `STT/whisper`          | (future STT) | present, unused   |
-| `wakeword/openWakeWord`| (future)     | present, unused   |
+| `STT/whisper`          | STT          | reference (STT uses the `faster-whisper` pip pkg) |
+| `wakeword/openWakeWord`| Wakeword     | reference (wakeword uses the `openwakeword` pip pkg) |
 
 ## Hardware
 

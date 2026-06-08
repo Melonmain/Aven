@@ -1,0 +1,23 @@
+[project]
+name = "aven-wakeword"
+version = "0.1.0"
+description = "Aven wakeword node: openWakeWord (CPU/ONNX) listens for a wake phrase."
+requires-python = ">=3.10"
+dependencies = [
+    "openwakeword>=0.6",
+    "onnxruntime>=1.16",
+    "numpy>=1.26",
+    "soxr>=0.5",
+    "pyyaml>=6",
+]
+
+# Live mic capture is optional (needs system PortAudio); --wav mode works without it.
+[project.optional-dependencies]
+mic = ["sounddevice>=0.4"]
+
+[tool.uv]
+# App-style project: install the deps, but don't try to build this dir as a package.
+package = false
+# openWakeWord hard-pins tflite-runtime (no cp312 wheel), but we run inference on
+# ONNX Runtime, so drop it via an always-false marker.
+override-dependencies = ["tflite-runtime ; python_version < '3'"]

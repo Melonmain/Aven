@@ -37,6 +37,12 @@ services:
     host: 127.0.0.1
     port: 8848
 
+  # STT node — faster-whisper speech-to-text (CPU). The client streams mic audio
+  # and gets back a transcript.
+  stt:
+    host: 100.108.158.94
+    port: 8767
+
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
@@ -66,6 +72,23 @@ ttsv2:
   speed: 1.0
   # Kokoro-82M native PCM rate.
   sample_rate: 24000
+
+# STT — faster-whisper, CPU. Audio in (any rate, resampled to 16 kHz) -> text.
+stt:
+  # Model name (downloaded from HuggingFace on first use). tiny.en/base.en are
+  # the practical CPU choices on a Rock 5C; small.en is slower but more accurate.
+  model: base.en
+  language: en          # null = autodetect
+  compute_type: int8    # int8 is fastest on CPU; int8_float32 / float32 also work
+  beam_size: 1          # 1 = greedy (fastest); higher is slower but can be better
+
+# Wakeword — openWakeWord, CPU (ONNX). Listens to the mic and fires on the
+# wake phrase, which would then kick off STT -> LLM -> TTS.
+wakeword:
+  # Pretrained model name shipped by openWakeWord (downloaded on first use).
+  # Options include: hey_jarvis, alexa, hey_mycroft, hey_rhasspy, timer, weather.
+  model: hey_jarvis
+  threshold: 0.5        # detection score (0..1) above which the wake phrase fires
 
 # TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
 # TTSV3/voice_server.py listens on the same `services.tts` port (8766). The

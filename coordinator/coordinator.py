@@ -53,6 +53,7 @@ class Player:
         self._sd = None
         self._stream = None
         self._rate = None
+        self._channels = 1
         if enabled:
             try:
                 import sounddevice as sd
@@ -66,14 +67,28 @@ class Player:
             return
         if self._stream is None or self._rate != rate:
             self._close_stream()
+            # Match the device's channel count (USB speakers are often stereo-only);
+            # mono PCM is duplicated across channels in write().
+            self._channels = 1
+            if self.device is not None:
+                try:
+                    mc = int(self._sd.query_devices(self.device)["max_output_channels"])
+                    self._channels = min(max(mc, 1), 2)
+                except Exception:
+                    self._channels = 1
             self._stream = self._sd.RawOutputStream(
-                samplerate=rate, channels=1, dtype="int16", device=self.device)
+                samplerate=rate, channels=self._channels, dtype="int16",
+                device=self.device)
             self._stream.start()
             self._rate = rate
 
     def write(self, pcm):
-        if self.enabled and self._stream:
-            self._stream.write(pcm)
+        if not (self.enabled and self._stream):
+            return
+        if self._channels > 1:                       # mono -> interleaved N-channel
+            mono = np.frombuffer(pcm, dtype=np.int16)
+            pcm = np.repeat(mono[:, None], self._channels, axis=1).ravel().tobytes()
+        self._stream.write(pcm)
 
     def beep(self, freq=880, ms=140, volume=0.3):
         """Play a short sine 'I heard you' tone through the speaker."""
@@ -162,22 +177,30 @@ def _score_of(prediction, model_name):
     return max(prediction.values()) if prediction else 0.0
 
 
-def _rms(frame_bytes):
-    a = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32)
+def _rms(frame):
+    a = frame.astype(np.float32)
     return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
 
 
-def record_utterance(stream, cc):
+def read_mono(stream, channels):
+    """Read one FRAME; if the device is multi-channel, keep channel 0 (mono)."""
+    data, _ = stream.read(FRAME)
+    a = np.frombuffer(bytes(data), dtype=np.int16)
+    if channels > 1:
+        a = a.reshape(-1, channels)[:, 0]
+    return np.ascontiguousarray(a)
+
+
+def record_utterance(stream, cc, channels):
     """Read mic frames after the wake word until trailing silence; return PCM."""
     frames = []
     elapsed = silence = voiced = 0.0
     dur = FRAME / RATE
     while True:
-        data, _ = stream.read(FRAME)
-        b = bytes(data)
-        frames.append(b)
+        m = read_mono(stream, channels)
+        frames.append(m.tobytes())
         elapsed += dur
-        if _rms(b) < cc["energy_threshold"]:
+        if _rms(m) < cc["energy_threshold"]:
             silence += dur
         else:
             silence = 0.0
@@ -199,17 +222,25 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     except Exception:
         model = Model(inference_framework="onnx")
 
+    # Match the mic's native channel count (the PS3 Eye is a 4-mic array); we
+    # downmix to channel 0. openWakeWord/STT want 16 kHz mono.
+    channels = 1
+    if input_device is not None:
+        try:
+            channels = max(int(sd.query_devices(input_device)["max_input_channels"]), 1)
+        except Exception:
+            channels = 1
+
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
-          f"(Ctrl+C to quit)")
+          f"(mic {channels}ch; Ctrl+C to quit)")
     with sd.RawInputStream(samplerate=RATE, blocksize=FRAME, dtype="int16",
-                           channels=1, device=input_device) as stream:
+                           channels=channels, device=input_device) as stream:
         while True:
-            data, _ = stream.read(FRAME)
-            frame = np.frombuffer(bytes(data), dtype=np.int16)
+            frame = read_mono(stream, channels)
             if _score_of(model.predict(frame), model_name) >= threshold:
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
                 player.beep()
-                pcm = record_utterance(stream, cc)
+                pcm = record_utterance(stream, cc, channels)
                 try:
                     text = transcribe(stt_url, pcm, RATE)
                 except Exception as exc:  # noqa: BLE001

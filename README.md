@@ -47,22 +47,26 @@ no hardcoded IPs in the code. Change a host/port once, everywhere picks it up.
 
 ## 1. LLM node (main Rock 5C — 100.108.158.94)
 
-rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312),
-so it is pinned explicitly. The orchestrator is a separate, lightweight UV
-project that only talks to rkllama over HTTP.
+rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312).
+It can't be launched with `uv run` directly — rkllama's pyproject declares its
+NPU wheel with a relative `file:./…` URL that uv refuses to parse — so
+`setup_rkllama.sh` installs it into a local venv (rewriting that URL to absolute
+just for the install) and you run it from that venv. The orchestrator is a
+separate, lightweight UV project that only talks to rkllama over HTTP.
 
 ```bash
-# a) rkllama NPU backend — its own venv inside the submodule
-cd LLM/rkllama
-uv run --python 3.12 rkllama_server          # serves http://0.0.0.0:8080
+# a) one-time: install rkllama into LLM/rkllama/venv (downloads torch etc. — large)
+bash LLM/setup_rkllama.sh
 
-# b) one-time: pull the model (in a second shell, server must be running)
-cd LLM/rkllama
-uv run --python 3.12 rkllama_client pull \
+# b) rkllama NPU backend (serves http://0.0.0.0:8080)
+cd LLM/rkllama && ./venv/bin/rkllama_server
+
+# c) one-time: pull the model (in a second shell, server must be running)
+cd LLM/rkllama && ./venv/bin/rkllama_client pull \
   c01zaut/Qwen2.5-3B-Instruct-rk3588-1.1.1/Qwen2.5-3B-Instruct-rk3588-w8a8-opt-0-hybrid-ratio-0.5.rkllm/qwen2.5-3b
 # → the local model becomes "qwen2.5-3b" (matches llm.model in config.yaml)
 
-# c) the orchestrator
+# d) the orchestrator
 cd LLM
 uv sync
 uv run python llm_server.py                  # serves ws://0.0.0.0:8765

@@ -231,6 +231,23 @@ Prereqs: the **STT** node (`STT/stt_server.py`) and the **LLM** node
 recording behaviour (silence timeout, etc.) live under `wakeword:` /
 `coordinator:` in [`config.yaml`](config.yaml).
 
+## Running the main board as daemons
+
+[`start_main_board.sh`](start_main_board.sh) starts the three services this board
+hosts — **rkllama** (:8080), **llm_server** (:8765), **stt** (:8767) — as
+background daemons that survive an SSH disconnect (logs in `logs/`). It waits for
+rkllama to be ready before launching the orchestrator, and is idempotent.
+
+```bash
+./start_main_board.sh            # start everything (skips what's already up)
+./start_main_board.sh status
+./start_main_board.sh restart stt
+./start_main_board.sh stop
+```
+
+(The TTS node runs on the other board; the coordinator is an interactive client —
+neither is started here.)
+
 ## Configuration
 
 All knobs live in [`config.yaml`](config.yaml): the host/port of each service,

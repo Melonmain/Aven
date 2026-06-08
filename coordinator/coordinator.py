@@ -75,6 +75,26 @@ class Player:
         if self.enabled and self._stream:
             self._stream.write(pcm)
 
+    def beep(self, freq=880, ms=140, volume=0.3):
+        """Play a short sine 'I heard you' tone through the speaker."""
+        if not self.enabled:
+            return
+        rate = 16000
+        n = int(rate * ms / 1000)
+        t = np.arange(n) / rate
+        tone = np.sin(2 * np.pi * freq * t)
+        fade = max(1, int(rate * 0.005))          # 5 ms fades to avoid clicks
+        env = np.ones(n)
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+        pcm = (tone * env * volume * 32767).astype(np.int16)
+        try:
+            self.begin(rate)
+            self.write(pcm.tobytes())
+            time.sleep(ms / 1000 + 0.03)          # let it finish before we record
+        except Exception:
+            pass
+
     def _close_stream(self):
         if self._stream:
             try:
@@ -188,6 +208,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
             frame = np.frombuffer(bytes(data), dtype=np.int16)
             if _score_of(model.predict(frame), model_name) >= threshold:
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
+                player.beep()
                 pcm = record_utterance(stream, cc)
                 try:
                     text = transcribe(stt_url, pcm, RATE)

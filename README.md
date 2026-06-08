@@ -44,6 +44,7 @@ being wired into the full voice loop:
 | `TTS/paroli/`        | NPU TTS backend (submodule, C++)         | built separately  |
 | `STT/stt_server.py`  | STT node (faster-whisper, CPU)           | `STT/`            |
 | `wakeword/wakeword_listener.py` | Wakeword (openWakeWord, CPU)  | `wakeword/`       |
+| `coordinator/coordinator.py` | Full voice loop client (mic→…→speaker) | `coordinator/` |
 
 Every service reads the **single `config.yaml`** at the repo root, so there are
 no hardcoded IPs in the code. Change a host/port once, everywhere picks it up.
@@ -201,6 +202,34 @@ uv sync                 # add `--extra audio` for PyAudio; otherwise falls back 
 uv run python connector.py
 # type a prompt; commands: /clear, /help, exit
 ```
+
+## 5. Coordinator — the full voice loop
+
+[`coordinator/`](coordinator/) is the one client that combines every stage. Run
+it on the device with the **mic + speakers**; it chains them and reaches the
+remote stages over WebSocket (STT `:8767`, LLM `:8765`, which itself drives TTS):
+
+```
+  mic ─▶ wakeword (local CPU) ─▶ record ─▶ STT ─▶ LLM ─▶ play reply ─▶ (loop)
+```
+
+```bash
+cd coordinator && uv sync
+sudo apt install -y libportaudio2          # mic + speaker capture/playback
+
+# full voice loop: say the wake word ("hey jarvis"), then your request
+uv run python coordinator.py
+
+# testable without a mic:
+uv run python coordinator.py --text "What is the capital of France?"
+uv run python coordinator.py --wav clip.wav        # STT a WAV, then ask the LLM
+uv run python coordinator.py --wav clip.wav --no-audio   # headless (print only)
+```
+
+Prereqs: the **STT** node (`STT/stt_server.py`) and the **LLM** node
+(`LLM/llm_server.py`, with its TTS node up) must be running. Wakeword phrase and
+recording behaviour (silence timeout, etc.) live under `wakeword:` /
+`coordinator:` in [`config.yaml`](config.yaml).
 
 ## Configuration
 

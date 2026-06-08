@@ -90,6 +90,14 @@ wakeword:
   model: hey_jarvis
   threshold: 0.5        # detection score (0..1) above which the wake phrase fires
 
+# Coordinator — the full voice loop client (mic -> wakeword -> record -> STT ->
+# LLM -> play). Runs on the device with the mic + speakers.
+coordinator:
+  max_record_seconds: 10.0   # hard cap on one utterance
+  silence_timeout: 0.8       # stop recording after this much trailing silence
+  min_record_seconds: 0.3    # ignore blips shorter than this
+  energy_threshold: 500      # int16 RMS below this counts as silence
+
 # TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
 # TTSV3/voice_server.py listens on the same `services.tts` port (8766). The
 # sample rate is read from the voice itself. Run only one TTS variant at a time.

@@ -293,7 +293,7 @@ searches the Spotify Web API (via `spotipy`), finds the `Aven` device, and start
 playback. It's **off until you add credentials**:
 
 1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard),
-   Redirect URI `http://localhost:8888/callback`.
+   Redirect URI `http://127.0.0.1:8888/callback`.
 2. Put the keys in `.env.local` (gitignored): `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`.
 3. One-time sign-in (needs Premium):
    ```bash

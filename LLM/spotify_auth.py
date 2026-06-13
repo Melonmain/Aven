@@ -11,7 +11,7 @@ Run on the LLM board:
     set -a; . ../.env.local; set +a        # load the SPOTIPY_* vars
     uv run python spotify_auth.py
 It prints a URL — open it in any browser (on any device), authorize, then paste
-the URL you land on (http://localhost:8888/callback?code=...) back here.
+the URL you land on (http://127.0.0.1:8888/callback?code=...) back here.
 """
 import os
 import pathlib
@@ -25,7 +25,7 @@ if not (os.environ.get("SPOTIPY_CLIENT_ID") and os.environ.get("SPOTIPY_CLIENT_S
 cache = str(pathlib.Path(__file__).resolve().parent / ".spotify_cache")
 auth = SpotifyOAuth(
     scope="user-modify-playback-state user-read-playback-state",
-    redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"),
+    redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
     cache_path=cache, open_browser=False)
 
 print("1) Open this URL in a browser and authorize:\n\n   " + auth.get_authorize_url() + "\n")

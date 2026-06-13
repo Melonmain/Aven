@@ -140,7 +140,7 @@ def _spotify():
         from spotipy.oauth2 import SpotifyOAuth
         auth = SpotifyOAuth(
             scope="user-modify-playback-state user-read-playback-state",
-            redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"),
+            redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
             cache_path=SPOTIFY_CACHE, open_browser=False)
         _spotify_client = (spotipy.Spotify(auth_manager=auth), auth)
     return _spotify_client

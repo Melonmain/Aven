@@ -169,10 +169,18 @@ def extract_clauses(buffer, min_soft_len=18, max_len=120):
     """
     clauses = []
     start = 0
+    n = len(buffer)
     for i, ch in enumerate(buffer):
         seg = buffer[start:i + 1]
         stripped = seg.strip()
-        if ch in HARD_BOUNDARIES or (ch in SOFT_BOUNDARIES and len(stripped) >= min_soft_len):
+        boundary = ch in HARD_BOUNDARIES or (ch in SOFT_BOUNDARIES and len(stripped) >= min_soft_len)
+        # Don't split inside a number: . , : between digits (15.7, 1,000, 15:30).
+        # At the buffer's end, a digit-dot is ambiguous, so wait for the next char.
+        if boundary and ch in ".,:" and i > 0 and buffer[i - 1].isdigit():
+            nxt = buffer[i + 1] if i + 1 < n else ""
+            if nxt == "" or nxt.isdigit():
+                boundary = False
+        if boundary:
             if stripped:
                 clauses.append(stripped)
             start = i + 1

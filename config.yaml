@@ -101,7 +101,7 @@ coordinator:
   # in, set these to the device index or a unique part of its name. List devices
   # with: cd coordinator && uv run python coordinator.py --list-devices
   input_device: USB Camera   # PS3 Eye mic array (matched by name; 4ch -> mono)
-  output_device: SoundBar    # Dell AC511 USB SoundBar (matched by name)
+  output_device: Pebble      # Creative Pebble V3 USB speakers (matched by name)
 
 # TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
 # TTSV3/voice_server.py listens on the same `services.tts` port (8766). The

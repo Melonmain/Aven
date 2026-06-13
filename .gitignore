@@ -1,5 +1,8 @@
 # Local secrets (API keys etc.) — never commit
 .env.local
+# Spotify OAuth token cache
+.spotify_cache
+**/.spotify_cache
 
 # Python / UV
 .venv/

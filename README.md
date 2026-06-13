@@ -281,6 +281,32 @@ coordinator beeps and announces "your timer is finished".
 A `get_time` tool answers *"what time is it?"* with the board's local time
 (spoken directly, no round-trip).
 
+### Spotify (`play_music`)
+
+The board runs **Raspotify** (librespot) as a Spotify **Connect** receiver named
+`Aven` (set in `/etc/raspotify/conf`), so it shows up as a speaker in the Spotify
+app on your phone (Premium required). Its audio and the assistant's TTS share the
+Pebble via an ALSA `dmix` (`/etc/asound.conf`), so they don't fight over the DAC.
+
+The `play_music` tool then lets you say *"play some Daft Punk"* — `llm_server`
+searches the Spotify Web API (via `spotipy`), finds the `Aven` device, and starts
+playback. It's **off until you add credentials**:
+
+1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard),
+   Redirect URI `http://localhost:8888/callback`.
+2. Put the keys in `.env.local` (gitignored): `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`.
+3. One-time sign-in (needs Premium):
+   ```bash
+   cd LLM && set -a && . ../.env.local && set +a && uv run python spotify_auth.py
+   ```
+   Open the printed URL, authorize, paste the redirect URL back. This caches a
+   token (`LLM/.spotify_cache`, gitignored) the server reuses.
+4. `./start_main_board.sh restart llm_server`.
+
+`spotify.device` in [`config.yaml`](config.yaml) must match `LIBRESPOT_NAME`.
+Note: the Web API only sees the device once it's been activated — if "the Aven
+speaker isn't available", select it once in your phone's Spotify Connect menu.
+
 ## Running the main board as daemons
 
 [`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as

@@ -54,6 +54,12 @@ lights:
 weather:
   location: Fulda
 
+# Spotify play_music tool. Credentials (SPOTIPY_CLIENT_ID/_SECRET/_REDIRECT_URI)
+# live in .env.local, not here. `device` is the Spotify Connect target name,
+# which must match LIBRESPOT_NAME in /etc/raspotify/conf.
+spotify:
+  device: Aven
+
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
@@ -114,7 +120,9 @@ coordinator:
   # in, set these to the device index or a unique part of its name. List devices
   # with: cd coordinator && uv run python coordinator.py --list-devices
   input_device: USB Camera   # PS3 Eye mic array (matched by name; 4ch -> mono)
-  output_device: Pebble      # Creative Pebble V3 USB speakers (matched by name)
+  # null = ALSA "default", which /etc/asound.conf routes to a dmix on the Pebble
+  # so the assistant (TTS) and Raspotify (Spotify) can share the speaker.
+  output_device: null
   # Keep conversation history across wake-words; reset it once this many seconds
   # pass between two wake-word detections (a new conversation).
   memory_timeout: 60

@@ -7,6 +7,7 @@ dependencies = [
     "websockets>=13",
     "requests>=2.31",
     "pyyaml>=6",
+    "spotipy>=2.24",   # Spotify Web API (play_music tool)
 ]
 
 # App-style project: install the deps, but don't try to build this dir as a package.

@@ -54,10 +54,18 @@ WEATHER_KEY = os.environ.get("WEATHERAPI_KEY")          # from .env.local, not t
 WEATHER_LOC = WEATHER.get("location", "Fulda")
 WEATHER_ENABLED = bool(WEATHER and WEATHER_KEY)
 
+SPOTIFY = _CFG.get("spotify", {}) or {}                 # Spotify Connect device name
+SPOTIFY_DEVICE = SPOTIFY.get("device", "Aven")
+SPOTIFY_ENABLED = bool(os.environ.get("SPOTIPY_CLIENT_ID")
+                       and os.environ.get("SPOTIPY_CLIENT_SECRET"))
+SPOTIFY_CACHE = str(pathlib.Path(__file__).resolve().parent / ".spotify_cache")
+
 if LIGHTS:
     DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
+if SPOTIFY_ENABLED:
+    DEFAULT_SYSTEM += " Use play_music to play a song or artist on Spotify."
 DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes, and get_time for the current time."
 
 
@@ -90,6 +98,14 @@ def build_tools():
         "description": "Get the current local time.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }})
+    if SPOTIFY_ENABLED:
+        tools.append({"type": "function", "function": {
+            "name": "play_music",
+            "description": "Play a song or artist on Spotify.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "song or artist to play"}},
+                "required": ["query"]},
+        }})
     return tools or None
 
 
@@ -109,6 +125,49 @@ def get_weather():
     except (requests.RequestException, ValueError) as exc:
         print(f"[tool] get_weather({WEATHER_LOC}) -> FAIL: {exc}", flush=True)
         return json.dumps({"error": f"weather unavailable: {exc}"})
+
+
+# --- Spotify (play_music) ---------------------------------------------------
+# Credentials come from the environment (set in .env.local); a one-time sign-in
+# (spotify_auth.py) writes the token cache the server reuses. Config above.
+_spotify_client = None
+
+
+def _spotify():
+    global _spotify_client
+    if _spotify_client is None:
+        import spotipy
+        from spotipy.oauth2 import SpotifyOAuth
+        auth = SpotifyOAuth(
+            scope="user-modify-playback-state user-read-playback-state",
+            redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"),
+            cache_path=SPOTIFY_CACHE, open_browser=False)
+        _spotify_client = (spotipy.Spotify(auth_manager=auth), auth)
+    return _spotify_client
+
+
+def play_music(query):
+    """Search Spotify and start playback on the Connect device (SPOTIFY_DEVICE)."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        items = sp.search(q=query, type="track", limit=1).get("tracks", {}).get("items", [])
+        if not items:
+            return f"I couldn't find {query} on Spotify."
+        track = items[0]
+        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
+                       if d.get("name") == SPOTIFY_DEVICE), None)
+        if not dev_id:
+            return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
+        sp.start_playback(device_id=dev_id, uris=[track["uri"]])
+        print(f"[tool] play_music({query!r}) -> {track['name']}", flush=True)
+        return f"Playing {track['name']} by {track['artists'][0]['name']}."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] play_music({query!r}) -> FAIL: {exc}", flush=True)
+        return "Sorry, I couldn't play that on Spotify."
 
 
 def execute_light(light, state):
@@ -173,6 +232,8 @@ def handle_tool_calls(calls):
             now = time.strftime("%H:%M")
             print(f"[tool] get_time -> {now}", flush=True)
             parts.append(f"It's {now}.")
+        elif name == "play_music":
+            parts.append(play_music(args.get("query", "")))
         else:
             parts.append("Sorry, I can't do that.")
     return (" ".join(parts) if parts else "Okay."), controls

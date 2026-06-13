@@ -43,6 +43,12 @@ services:
     host: 100.108.158.94
     port: 8767
 
+# Smart-home devices controllable by the LLM via the set_light tool.
+# Tasmota plugs, switched over HTTP (http://<ip>/cm?cmnd=Power%20On|Off).
+lights:
+  bed: 192.168.188.29
+  tv: 192.168.188.22
+
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b

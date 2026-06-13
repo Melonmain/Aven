@@ -44,6 +44,74 @@ _TTS_HOST, TTS_WS_PORT = service_addr("tts")          # the TTS node
 DEFAULT_MODEL = _CFG["llm"]["model"]
 DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
 
+# --- Smart-home tools (Tasmota plugs) ---------------------------------------
+LIGHTS = _CFG.get("lights", {}) or {}
+
+if LIGHTS:
+    DEFAULT_SYSTEM += (
+        " You can switch these smart lights with the set_light tool: "
+        + ", ".join(LIGHTS) + ". Call set_light whenever the user asks to turn a "
+        "light on or off; do not ask for confirmation."
+    )
+
+
+def build_tools():
+    """OpenAI tool spec for set_light, with the light names from config."""
+    if not LIGHTS:
+        return None
+    return [{
+        "type": "function",
+        "function": {
+            "name": "set_light",
+            "description": "Turn one of the smart lights on or off.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "light": {"type": "string", "enum": list(LIGHTS),
+                              "description": "which light to switch"},
+                    "state": {"type": "string", "enum": ["on", "off"]},
+                },
+                "required": ["light", "state"],
+            },
+        },
+    }]
+
+
+TOOLS = build_tools()
+
+
+def execute_light(light, state):
+    """Switch a Tasmota plug over HTTP. Return (ok, error)."""
+    ip = LIGHTS.get(light)
+    if not ip:
+        return False, f"unknown light '{light}'"
+    cmnd = "Power%20On" if state == "on" else "Power%20Off"
+    try:
+        r = requests.get(f"http://{ip}/cm?cmnd={cmnd}", timeout=5)
+        return r.status_code == 200, None
+    except requests.RequestException as exc:
+        return False, str(exc)
+
+
+def handle_tool_calls(calls):
+    """Run each tool call; return a short spoken confirmation."""
+    parts = []
+    for call in calls:
+        if call.get("name") != "set_light":
+            parts.append("Sorry, I can't do that.")
+            continue
+        args = call.get("arguments") or {}
+        light, state = args.get("light"), args.get("state")
+        ok, err = execute_light(light, state)
+        print(f"[tool] set_light({light}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
+              flush=True)
+        if ok:
+            parts.append(f"Okay, I've turned the {light} light {state}.")
+        else:
+            parts.append(f"Sorry, I couldn't reach the {light} light.")
+    return " ".join(parts) if parts else "Okay."
+
+
 # --- Clause chunking --------------------------------------------------------
 HARD_BOUNDARIES = ".!?\n"
 SOFT_BOUNDARIES = ",;:"
@@ -76,9 +144,16 @@ def extract_clauses(buffer, min_soft_len=18, max_len=120):
     return clauses, buffer[start:]
 
 
-def stream_llm(messages, model):
-    """Yield assistant text tokens from the local rkllama OpenAI endpoint."""
+def stream_llm(messages, model, tools=None):
+    """Stream from rkllama; yield ('text', token) or ('tool', [calls]).
+
+    Tool-call argument fragments are accumulated by index (rkllama sends them as
+    a JSON string while streaming) and emitted once as parsed dicts at the end.
+    """
     payload = {"model": model, "messages": messages, "stream": True}
+    if tools:
+        payload["tools"] = tools
+    tool_acc = {}
     with requests.post(
         f"{LLM_URL}/v1/chat/completions", json=payload, stream=True, timeout=300
     ) as resp:
@@ -93,11 +168,36 @@ def stream_llm(messages, model):
                 chunk = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            choices = chunk.get("choices", [])
-            if choices and "delta" in choices[0]:
-                token = choices[0]["delta"].get("content") or ""
-                if token:
-                    yield token
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            tcs = delta.get("tool_calls")
+            if tcs:
+                for tc in tcs:
+                    acc = tool_acc.setdefault(tc.get("index", 0), {"name": "", "arguments": ""})
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        acc["name"] = fn["name"]
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        acc["arguments"] += args
+                    elif isinstance(args, dict):
+                        acc["arguments"] = json.dumps(args)
+                continue
+            token = delta.get("content") or ""
+            if token:
+                yield ("text", token)
+    if tool_acc:
+        calls = []
+        for idx in sorted(tool_acc):
+            acc = tool_acc[idx]
+            try:
+                args = json.loads(acc["arguments"]) if acc["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            calls.append({"name": acc["name"], "arguments": args})
+        yield ("tool", calls)
 
 
 def synth_clause(tts_ws, text):
@@ -137,16 +237,30 @@ def run_turn(conn, tts_url, prompt, history, model):
         try:
             collected = []
             buf = ""
-            for token in stream_llm(history, model):
-                collected.append(token)
-                events.put(("llm", token))
-                buf += token
-                clauses, buf = extract_clauses(buf)
-                for clause in clauses:
-                    events.put(("clause", clause))
-            tail = buf.strip()
-            if tail:
-                events.put(("clause", tail))
+            tool_reply = None
+            for kind, val in stream_llm(history, model, TOOLS):
+                if kind == "text":
+                    collected.append(val)
+                    events.put(("llm", val))
+                    buf += val
+                    clauses, buf = extract_clauses(buf)
+                    for clause in clauses:
+                        events.put(("clause", clause))
+                elif kind == "tool":
+                    # Run the tool(s), then speak a confirmation instead of a
+                    # generated reply.
+                    tool_reply = handle_tool_calls(val)
+                    events.put(("llm", tool_reply))
+                    clauses, tail = extract_clauses(tool_reply + "\n")
+                    for clause in clauses:
+                        events.put(("clause", clause))
+                    if tail.strip():
+                        events.put(("clause", tail.strip()))
+                    collected = [tool_reply]
+            if tool_reply is None:
+                tail = buf.strip()
+                if tail:
+                    events.put(("clause", tail))
             events.put(("eot", "".join(collected)))
         except Exception as exc:  # noqa: BLE001
             events.put(("error", str(exc)))

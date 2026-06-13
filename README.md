@@ -231,6 +231,23 @@ Prereqs: the **STT** node (`STT/stt_server.py`) and the **LLM** node
 recording behaviour (silence timeout, etc.) live under `wakeword:` /
 `coordinator:` in [`config.yaml`](config.yaml).
 
+### Smart-home control (tool calls)
+
+The LLM can switch Tasmota smart plugs via a `set_light` tool. Say e.g. *"turn
+off the bed light"* and the model calls the tool; `llm_server.py` issues the
+HTTP command to the plug and then speaks a confirmation ("Okay, I've turned the
+bed light off"). Define the plugs under `lights:` in [`config.yaml`](config.yaml):
+
+```yaml
+lights:
+  bed: 192.168.188.29   # Tasmota plug IP
+  tv:  192.168.188.22
+```
+
+Each entry becomes an allowed value of the tool's `light` argument; the plug is
+switched with `http://<ip>/cm?cmnd=Power%20On|Off`. Add more plugs by adding
+lines here (no code change). Requires the LLM board to reach the plugs' network.
+
 ## Running the main board as daemons
 
 [`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as

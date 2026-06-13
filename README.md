@@ -231,6 +231,11 @@ Prereqs: the **STT** node (`STT/stt_server.py`) and the **LLM** node
 recording behaviour (silence timeout, etc.) live under `wakeword:` /
 `coordinator:` in [`config.yaml`](config.yaml).
 
+**Conversation memory:** the coordinator keeps one LLM connection across
+wake-words, so history carries over between turns (ask a follow-up without
+repeating context). Once `coordinator.memory_timeout` seconds (default 60) pass
+between two wake-words, it starts a fresh conversation.
+
 ### Smart-home control (tool calls)
 
 The LLM can switch Tasmota smart plugs via a `set_light` tool. Say e.g. *"turn

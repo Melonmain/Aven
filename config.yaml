@@ -46,8 +46,8 @@ services:
 # Smart-home devices controllable by the LLM via the set_light tool.
 # Tasmota plugs, switched over HTTP (http://<ip>/cm?cmnd=Power%20On|Off).
 lights:
-  bed: 192.168.188.29
-  tv: 192.168.188.22
+  bed: 192.168.188.22
+  tv: 192.168.188.29
 
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
@@ -108,6 +108,9 @@ coordinator:
   # with: cd coordinator && uv run python coordinator.py --list-devices
   input_device: USB Camera   # PS3 Eye mic array (matched by name; 4ch -> mono)
   output_device: Pebble      # Creative Pebble V3 USB speakers (matched by name)
+  # Keep conversation history across wake-words; reset it once this many seconds
+  # pass between two wake-word detections (a new conversation).
+  memory_timeout: 60
 
 # TTSV3 — Piper (CPU, in-process via piper-tts; no separate backend, no NPU).
 # TTSV3/voice_server.py listens on the same `services.tts` port (8766). The

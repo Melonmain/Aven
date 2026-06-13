@@ -154,57 +154,51 @@ def transcribe(stt_url, pcm_bytes, rate):
     return text
 
 
-def converse(llm_url, text, player):
-    """Send text to the LLM node; stream the transcript and play the audio.
+def _stream_reply(ws, text, player):
+    """Send one prompt on an open LLM ws; stream transcript + play audio.
 
     Logs what the LLM/TTS node streams back (transcript, audio_start params, PCM
-    chunk/byte counts) and the latency of each milestone.
+    chunk/byte counts) and the latency of each milestone. Lets ConnectionClosed
+    propagate so a persistent caller can reconnect.
     """
-    from websockets.sync.client import connect
-    from websockets.exceptions import ConnectionClosed
-
     t0 = time.perf_counter()
     ms = lambda t: (t - t0) * 1000
     first_tok = first_audio = done_t = None
     chunks = nbytes = 0
-    rate = ch = width = None
+    rate = None
 
-    with connect(llm_url, max_size=None) as ws:
-        ws.send(json.dumps({"text": text}))
-        log.info("LLM  : sent prompt (%d chars)", len(text))
-        sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
-        sys.stdout.flush()
-        try:
-            for message in ws:
-                if isinstance(message, (bytes, bytearray)):
-                    if first_audio is None:
-                        first_audio = time.perf_counter()
-                        log.info("TTS  : first audio chunk @ %.0f ms", ms(first_audio))
-                    chunks += 1
-                    nbytes += len(message)
-                    player.write(message)
-                    continue
-                event = json.loads(message)
-                etype = event.get("type")
-                if etype == "audio_start":
-                    rate = event.get("sample_rate"); ch = event.get("channels")
-                    width = event.get("sample_width")
-                    log.info("TTS  : audio_start %s Hz, %s ch, %s-byte samples @ %.0f ms",
-                             rate, ch, width, ms(time.perf_counter()))
-                    player.begin(rate)
-                elif etype == "llm":
-                    if first_tok is None:
-                        first_tok = time.perf_counter()
-                        log.info("LLM  : first token @ %.0f ms", ms(first_tok))
-                    sys.stdout.write(event["text"]); sys.stdout.flush()
-                elif etype == "error":
-                    log.warning("server error: %s", event.get("message"))
-                    print(f"\n{RED}server error: {event.get('message')}{RESET}")
-                elif etype == "done":
-                    done_t = time.perf_counter()
-                    break
-        except ConnectionClosed:
-            print(f"\n{RED}LLM connection closed.{RESET}")
+    ws.send(json.dumps({"text": text}))
+    log.info("LLM  : sent prompt (%d chars)", len(text))
+    sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
+    sys.stdout.flush()
+    for message in ws:
+        if isinstance(message, (bytes, bytearray)):
+            if first_audio is None:
+                first_audio = time.perf_counter()
+                log.info("TTS  : first audio chunk @ %.0f ms", ms(first_audio))
+            chunks += 1
+            nbytes += len(message)
+            player.write(message)
+            continue
+        event = json.loads(message)
+        etype = event.get("type")
+        if etype == "audio_start":
+            rate = event.get("sample_rate")
+            log.info("TTS  : audio_start %s Hz, %s ch, %s-byte samples @ %.0f ms",
+                     rate, event.get("channels"), event.get("sample_width"),
+                     ms(time.perf_counter()))
+            player.begin(rate)
+        elif etype == "llm":
+            if first_tok is None:
+                first_tok = time.perf_counter()
+                log.info("LLM  : first token @ %.0f ms", ms(first_tok))
+            sys.stdout.write(event["text"]); sys.stdout.flush()
+        elif etype == "error":
+            log.warning("server error: %s", event.get("message"))
+            print(f"\n{RED}server error: {event.get('message')}{RESET}")
+        elif etype == "done":
+            done_t = time.perf_counter()
+            break
     print()
 
     audio_s = nbytes / 2 / rate if rate else 0.0
@@ -213,6 +207,67 @@ def converse(llm_url, text, player):
              ms(done_t) if done_t else 0, ms(first_tok) if first_tok else 0,
              ms(first_audio) if first_audio else 0)
     return {"total_s": (done_t - t0) if done_t else 0.0, "audio_s": audio_s}
+
+
+def converse(llm_url, text, player):
+    """One-shot turn on a fresh connection (used by --text / --wav modes)."""
+    from websockets.sync.client import connect
+    from websockets.exceptions import ConnectionClosed
+    with connect(llm_url, max_size=None) as ws:
+        try:
+            return _stream_reply(ws, text, player)
+        except ConnectionClosed:
+            print(f"\n{RED}LLM connection closed.{RESET}")
+            return {}
+
+
+class LLMSession:
+    """Persistent LLM connection so history accumulates across wake-words.
+
+    The LLM node keeps conversation history per connection, so reusing one
+    connection gives multi-turn memory; `clear()` (sent when too long has passed
+    between wake-words) resets it to a fresh conversation.
+    """
+
+    def __init__(self, url):
+        self.url = url
+        self._ws = None
+
+    def _ensure(self):
+        if self._ws is None:
+            from websockets.sync.client import connect
+            self._ws = connect(self.url, max_size=None, open_timeout=10)
+        return self._ws
+
+    def _reset(self):
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+    def clear(self):
+        """Drop the server-side history (start a new conversation)."""
+        from websockets.exceptions import ConnectionClosed
+        if self._ws is None:
+            return
+        try:
+            self._ws.send(json.dumps({"command": "clear"}))
+            self._ws.recv()   # consume the {"type":"cleared"} ack
+        except (ConnectionClosed, OSError):
+            self._reset()
+
+    def turn(self, text, player):
+        from websockets.exceptions import ConnectionClosed
+        try:
+            return _stream_reply(self._ensure(), text, player)
+        except (ConnectionClosed, OSError):
+            self._reset()   # reconnect (fresh history) on the next turn
+            raise
+
+    def close(self):
+        self._reset()
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +336,10 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
         except Exception:
             channels = 1
 
+    session = LLMSession(llm_url)
+    mem_timeout = cc.get("memory_timeout", 60)
+    last_wake = None
+
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
           f"(mic {channels}ch; Ctrl+C to quit)")
     with sd.RawInputStream(samplerate=RATE, blocksize=FRAME, dtype="int16",
@@ -289,7 +348,14 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
             frame = read_mono(stream, channels)
             if _score_of(model.predict(frame), model_name) >= threshold:
                 t_wake = time.perf_counter()
-                log.info("WAKE : '%s' detected", model_name)
+                # New conversation if too long since the previous wake-word.
+                gap = (time.time() - last_wake) if last_wake else None
+                if gap is not None and gap >= mem_timeout:
+                    session.clear()
+                    log.info("MEM  : reset conversation (%.0fs since last wake)", gap)
+                last_wake = time.time()
+                log.info("WAKE : '%s' detected%s", model_name,
+                         "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
                 player.beep()
                 pcm = record_utterance(stream, cc, channels)
@@ -303,10 +369,13 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 print(f"{CYAN}You:{RESET} {text}")
                 if text.strip():
                     try:
-                        converse(llm_url, text, player)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("LLM error: %s", exc)
-                        print(f"{RED}LLM error: {exc}{RESET}")
+                        session.turn(text, player)
+                    except Exception:  # noqa: BLE001 — reconnect and retry once
+                        try:
+                            session.turn(text, player)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("LLM error: %s", exc)
+                            print(f"{RED}LLM error: {exc}{RESET}")
                 log.info("TURN : total %.2fs (wake -> reply done)",
                          time.perf_counter() - t_wake)
                 if hasattr(model, "reset"):

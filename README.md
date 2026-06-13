@@ -249,8 +249,9 @@ lights:
   tv:  192.168.188.22
 ```
 
-Each entry becomes an allowed value of the tool's `light` argument; the plug is
-switched with `http://<ip>/cm?cmnd=Power%20On|Off`. Add more plugs by adding
+Each entry becomes an allowed value of the tool's `light` argument (plus `all`,
+which switches every configured light — *"turn off all the lights"*); the plug
+is switched with `http://<ip>/cm?cmnd=Power%20On|Off`. Add more plugs by adding
 lines here (no code change). Requires the LLM board to reach the plugs' network.
 
 ## Running the main board as daemons

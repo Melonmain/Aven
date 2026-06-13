@@ -50,8 +50,9 @@ LIGHTS = _CFG.get("lights", {}) or {}
 if LIGHTS:
     DEFAULT_SYSTEM += (
         " You can switch these smart lights with the set_light tool: "
-        + ", ".join(LIGHTS) + ". Call set_light whenever the user asks to turn a "
-        "light on or off; do not ask for confirmation."
+        + ", ".join(LIGHTS) + ", or 'all' for every light at once. Call set_light "
+        "whenever the user asks to turn a light on or off; do not ask for "
+        "confirmation."
     )
 
 
@@ -67,8 +68,8 @@ def build_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "light": {"type": "string", "enum": list(LIGHTS),
-                              "description": "which light to switch"},
+                    "light": {"type": "string", "enum": list(LIGHTS) + ["all"],
+                              "description": "which light to switch ('all' = every light)"},
                     "state": {"type": "string", "enum": ["on", "off"]},
                 },
                 "required": ["light", "state"],
@@ -102,10 +103,21 @@ def handle_tool_calls(calls):
             continue
         args = call.get("arguments") or {}
         light, state = args.get("light"), args.get("state")
-        ok, err = execute_light(light, state)
-        print(f"[tool] set_light({light}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
-              flush=True)
-        if ok:
+        targets = list(LIGHTS) if light == "all" else [light]
+        failed = []
+        for t in targets:
+            ok, err = execute_light(t, state)
+            print(f"[tool] set_light({t}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
+                  flush=True)
+            if not ok:
+                failed.append(t)
+        if light == "all":
+            if not failed:
+                parts.append(f"Okay, I've turned all the lights {state}.")
+            else:
+                parts.append("Sorry, I couldn't reach the "
+                             + " and ".join(failed) + " light.")
+        elif not failed:
             parts.append(f"Okay, I've turned the {light} light {state}.")
         else:
             parts.append(f"Sorry, I couldn't reach the {light} light.")

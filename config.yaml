@@ -52,6 +52,9 @@ lights:
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
+  # Ping rkllama every N minutes so it never unloads the model (rkllama drops it
+  # after 30 min idle). Avoids a slow cold reload after long gaps. 0 = disabled.
+  keepalive_minutes: 10
   system_prompt: >-
     You are Aven, a voice assistant. Reply briefly in plain spoken sentences for
     text to speech, with no markdown or special symbols.

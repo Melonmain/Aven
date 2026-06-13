@@ -27,6 +27,7 @@ import pathlib
 import queue
 import sys
 import threading
+import time
 
 import requests
 
@@ -43,6 +44,7 @@ _TTS_HOST, TTS_WS_PORT = service_addr("tts")          # the TTS node
 
 DEFAULT_MODEL = _CFG["llm"]["model"]
 DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
+KEEPALIVE_MIN = _CFG["llm"].get("keepalive_minutes", 0)
 
 # --- Smart-home tools (Tasmota plugs) ---------------------------------------
 LIGHTS = _CFG.get("lights", {}) or {}
@@ -363,6 +365,26 @@ def pick_model(default_model):
     return models[0]
 
 
+def keep_warm(model, minutes):
+    """Ping rkllama on an interval so it never unloads the model.
+
+    rkllama drops an idle model after ~30 min; a tiny periodic generation resets
+    that timer, so the first request after a long gap (overnight, etc.) isn't a
+    slow cold reload. Negligible NPU cost.
+    """
+    interval = minutes * 60
+    while True:
+        time.sleep(interval)
+        try:
+            requests.post(f"{LLM_URL}/v1/chat/completions", timeout=60, json={
+                "model": model, "max_tokens": 1, "stream": False,
+                "messages": [{"role": "user", "content": "ping"}],
+            })
+            print("[keepalive] pinged rkllama", flush=True)
+        except requests.RequestException as exc:
+            print(f"[keepalive] ping failed: {exc}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LLM node (Phase 3)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address for the laptop")
@@ -385,9 +407,13 @@ def main():
     tts_url = f"ws://{args.tts_host}:{args.tts_port}"
     handler = make_handler(tts_url, model, args.system)
 
+    if KEEPALIVE_MIN > 0:
+        threading.Thread(target=keep_warm, args=(model, KEEPALIVE_MIN), daemon=True).start()
+
     print("\033[32mLLM node ready.\033[0m")
     print(f"  LLM model : {model}  (via {LLM_URL})")
     print(f"  TTS node  : {tts_url}")
+    print(f"  Keep-warm : {'every %d min' % KEEPALIVE_MIN if KEEPALIVE_MIN > 0 else 'off'}")
     print(f"  Listening : ws://{args.host}:{args.port}  (laptop connects to ws://{ROCK5C_IP}:{args.port})")
     with serve(handler, args.host, args.port) as server:
         server.serve_forever()

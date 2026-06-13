@@ -170,7 +170,7 @@ def handle_tool_calls(calls):
             print(f"[tool] set_timer({secs}s)", flush=True)
             parts.append(f"Okay, timer set for {_fmt_duration(secs)}.")
         elif name == "get_time":
-            now = time.strftime("%I:%M %p").lstrip("0")
+            now = time.strftime("%H:%M")
             print(f"[tool] get_time -> {now}", flush=True)
             parts.append(f"It's {now}.")
         else:

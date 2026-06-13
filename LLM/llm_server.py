@@ -26,6 +26,7 @@ import json
 import os
 import pathlib
 import queue
+import re
 import sys
 import threading
 import time
@@ -192,6 +193,20 @@ def stop_music():
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] stop_music -> {exc}", flush=True)
         return "Sorry, I couldn't stop the music."
+
+
+# Deterministic shortcuts: critical commands the small model fumbles as tool
+# calls (it sometimes just says "stopped" without doing it). Handle them here,
+# before the LLM, so they always work. Returns a spoken reply or None.
+_STOP_RE = re.compile(
+    r"^\s*(stop|pause|quiet|be quiet|shut up|halt)"
+    r"( (the )?(music|song|playback|playing|spotify))?\s*[.!]*\s*$", re.I)
+
+
+def quick_intent(prompt):
+    if SPOTIFY_ENABLED and _STOP_RE.match(prompt or ""):
+        return stop_music()
+    return None
 
 
 def execute_light(light, state):
@@ -415,6 +430,17 @@ def run_turn(conn, tts_url, prompt, history, model):
             collected = []
             buf = ""
             tool_reply = None
+            # Deterministic shortcut (e.g. "stop") — run it, skip the LLM.
+            shortcut = quick_intent(prompt)
+            if shortcut is not None:
+                events.put(("llm", shortcut))
+                clauses, tail = extract_clauses(shortcut + "\n")
+                for clause in clauses:
+                    events.put(("clause", clause))
+                if tail.strip():
+                    events.put(("clause", tail.strip()))
+                events.put(("eot", shortcut))
+                return
             for kind, val in stream_llm(history, model, TOOLS):
                 if kind == "text":
                     collected.append(val)

@@ -11,6 +11,7 @@ dependencies = [
     "sounddevice>=0.4",
     "websockets>=13",
     "pyyaml>=6",
+    "webrtcvad-wheels>=2.0.14",   # voice-activity detection for end-pointing
 ]
 
 [tool.uv]

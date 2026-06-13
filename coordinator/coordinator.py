@@ -296,23 +296,50 @@ def read_mono(stream, channels):
     return np.ascontiguousarray(a)
 
 
-def record_utterance(stream, cc, channels):
-    """Read mic frames after the wake word until trailing silence; return PCM."""
+def make_vad(cc):
+    """webrtcvad voice-activity detector, or None to fall back to energy."""
+    try:
+        import webrtcvad
+        return webrtcvad.Vad(int(cc.get("vad_aggressiveness", 2)))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("webrtcvad unavailable (%s); using energy threshold", exc)
+        return None
+
+
+_VAD_SUB = 320  # 20 ms @ 16 kHz — webrtcvad needs 10/20/30 ms frames
+
+
+def _is_speech(m, vad, energy_threshold):
+    """True if the 80 ms frame contains speech (VAD if available, else energy)."""
+    if vad is None:
+        return _rms(m) >= energy_threshold
+    for k in range(0, len(m) - _VAD_SUB + 1, _VAD_SUB):
+        if vad.is_speech(m[k:k + _VAD_SUB].tobytes(), RATE):
+            return True
+    return False
+
+
+def record_utterance(stream, cc, channels, vad):
+    """Record from wake until the speaker stops (end-pointing).
+
+    Wait for speech to start, then stop once `silence_timeout` of non-speech
+    follows — so it ends right when you finish, instead of a fixed timeout.
+    """
     frames = []
-    elapsed = silence = voiced = 0.0
+    elapsed = trailing_silence = 0.0
+    started = False
     dur = FRAME / RATE
     while True:
         m = read_mono(stream, channels)
         frames.append(m.tobytes())
         elapsed += dur
-        if _rms(m) < cc["energy_threshold"]:
-            silence += dur
-        else:
-            silence = 0.0
-            voiced += dur
+        if _is_speech(m, vad, cc["energy_threshold"]):
+            started, trailing_silence = True, 0.0
+        elif started:
+            trailing_silence += dur
         if elapsed >= cc["max_record_seconds"]:
             break
-        if voiced >= cc["min_record_seconds"] and silence >= cc["silence_timeout"]:
+        if started and trailing_silence >= cc["silence_timeout"]:
             break
     return b"".join(frames)
 
@@ -339,6 +366,8 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     session = LLMSession(llm_url)
     mem_timeout = cc.get("memory_timeout", 60)
     last_wake = None
+    vad = make_vad(cc)
+    log.info("end-pointing: %s", "webrtcvad" if vad else "energy threshold")
 
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
           f"(mic {channels}ch; Ctrl+C to quit)")
@@ -358,7 +387,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                          "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
                 player.beep()
-                pcm = record_utterance(stream, cc, channels)
+                pcm = record_utterance(stream, cc, channels, vad)
                 log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured",
                          time.perf_counter() - t_wake, len(pcm) / 2 / RATE)
                 try:

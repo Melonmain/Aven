@@ -99,10 +99,13 @@ wakeword:
 # Coordinator — the full voice loop client (mic -> wakeword -> record -> STT ->
 # LLM -> play). Runs on the device with the mic + speakers.
 coordinator:
-  max_record_seconds: 10.0   # hard cap on one utterance
-  silence_timeout: 0.8       # stop recording after this much trailing silence
+  max_record_seconds: 10.0   # hard safety cap on one utterance
+  silence_timeout: 0.8       # stop once this much non-speech follows your words
   min_record_seconds: 0.3    # ignore blips shorter than this
-  energy_threshold: 500      # int16 RMS below this counts as silence
+  # End-pointing uses webrtcvad; aggressiveness 0 (lax) .. 3 (strict about
+  # calling audio speech). energy_threshold is the fallback if vad is missing.
+  vad_aggressiveness: 2
+  energy_threshold: 500      # int16 RMS below this counts as silence (fallback)
   # USB mic / speakers: null = system default. Once the USB devices are plugged
   # in, set these to the device index or a unique part of its name. List devices
   # with: cd coordinator && uv run python coordinator.py --list-devices

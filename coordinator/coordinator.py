@@ -28,6 +28,7 @@ import json
 import logging
 import pathlib
 import sys
+import threading
 import time
 import wave
 
@@ -45,6 +46,10 @@ log = logging.getLogger("aven")
 _CFG = load_config()
 RATE = 16000
 FRAME = 1280  # 80 ms @ 16 kHz
+
+# Serialize speaker use so a firing timer never overlaps reply/beep playback.
+PLAYBACK_LOCK = threading.Lock()
+_timers = []  # keep references so scheduled timers aren't garbage-collected
 
 
 # --------------------------------------------------------------------------- #
@@ -171,34 +176,37 @@ def _stream_reply(ws, text, player):
     log.info("LLM  : sent prompt (%d chars)", len(text))
     sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
     sys.stdout.flush()
-    for message in ws:
-        if isinstance(message, (bytes, bytearray)):
-            if first_audio is None:
-                first_audio = time.perf_counter()
-                log.info("TTS  : first audio chunk @ %.0f ms", ms(first_audio))
-            chunks += 1
-            nbytes += len(message)
-            player.write(message)
-            continue
-        event = json.loads(message)
-        etype = event.get("type")
-        if etype == "audio_start":
-            rate = event.get("sample_rate")
-            log.info("TTS  : audio_start %s Hz, %s ch, %s-byte samples @ %.0f ms",
-                     rate, event.get("channels"), event.get("sample_width"),
-                     ms(time.perf_counter()))
-            player.begin(rate)
-        elif etype == "llm":
-            if first_tok is None:
-                first_tok = time.perf_counter()
-                log.info("LLM  : first token @ %.0f ms", ms(first_tok))
-            sys.stdout.write(event["text"]); sys.stdout.flush()
-        elif etype == "error":
-            log.warning("server error: %s", event.get("message"))
-            print(f"\n{RED}server error: {event.get('message')}{RESET}")
-        elif etype == "done":
-            done_t = time.perf_counter()
-            break
+    with PLAYBACK_LOCK:                       # exclusive speaker for this reply
+        for message in ws:
+            if isinstance(message, (bytes, bytearray)):
+                if first_audio is None:
+                    first_audio = time.perf_counter()
+                    log.info("TTS  : first audio chunk @ %.0f ms", ms(first_audio))
+                chunks += 1
+                nbytes += len(message)
+                player.write(message)
+                continue
+            event = json.loads(message)
+            etype = event.get("type")
+            if etype == "audio_start":
+                rate = event.get("sample_rate")
+                log.info("TTS  : audio_start %s Hz, %s ch, %s-byte samples @ %.0f ms",
+                         rate, event.get("channels"), event.get("sample_width"),
+                         ms(time.perf_counter()))
+                player.begin(rate)
+            elif etype == "llm":
+                if first_tok is None:
+                    first_tok = time.perf_counter()
+                    log.info("LLM  : first token @ %.0f ms", ms(first_tok))
+                sys.stdout.write(event["text"]); sys.stdout.flush()
+            elif etype == "timer":
+                schedule_timer(int(event.get("seconds", 0)), player)
+            elif etype == "error":
+                log.warning("server error: %s", event.get("message"))
+                print(f"\n{RED}server error: {event.get('message')}{RESET}")
+            elif etype == "done":
+                done_t = time.perf_counter()
+                break
     print()
 
     audio_s = nbytes / 2 / rate if rate else 0.0
@@ -268,6 +276,45 @@ class LLMSession:
 
     def close(self):
         self._reset()
+
+
+# --------------------------------------------------------------------------- #
+# Timers (scheduled locally; only this client has the speaker)
+# --------------------------------------------------------------------------- #
+def tts_say(text, player):
+    """Speak a phrase by synthesizing it directly on the TTS node (no LLM)."""
+    from websockets.sync.client import connect
+    host, port = service_addr("tts")
+    try:
+        with connect(f"ws://{host}:{port}", max_size=None, open_timeout=5) as ws:
+            ws.send(json.dumps({"text": text}))
+            for m in ws:
+                if isinstance(m, (bytes, bytearray)):
+                    player.write(m)
+                    continue
+                ev = json.loads(m)
+                if ev.get("type") == "audio_start":
+                    player.begin(ev["sample_rate"])
+                elif ev.get("type") == "done":
+                    break
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tts_say failed: %s", exc)
+
+
+def fire_timer(player):
+    log.info("TIMER: finished")
+    print(f"\n{YELLOW}⏰ timer finished{RESET}", flush=True)
+    with PLAYBACK_LOCK:
+        player.beep()
+        tts_say("Your timer is finished.", player)
+
+
+def schedule_timer(seconds, player):
+    log.info("TIMER: set for %ds", seconds)
+    t = threading.Timer(seconds, fire_timer, args=(player,))
+    t.daemon = True
+    t.start()
+    _timers.append(t)
 
 
 # --------------------------------------------------------------------------- #
@@ -386,7 +433,8 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 log.info("WAKE : '%s' detected%s", model_name,
                          "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
-                player.beep()
+                with PLAYBACK_LOCK:
+                    player.beep()
                 pcm = record_utterance(stream, cc, channels, vad)
                 log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured",
                          time.perf_counter() - t_wake, len(pcm) / 2 / RATE)

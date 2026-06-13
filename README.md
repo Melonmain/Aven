@@ -272,6 +272,12 @@ echo 'WEATHERAPI_KEY=your_key_here' > .env.local
 (Unlike `set_light`, which speaks a fixed confirmation, data tools like
 `get_weather` do a tool-result round-trip so the model phrases the reply.)
 
+A `set_timer` tool (parameter: minutes) is also available — *"set a timer for 5
+minutes"*. The LLM node confirms ("timer set for 5 minutes") and sends a
+`{"type":"timer","seconds":N}` control event to the **coordinator**, which
+schedules it locally (only the coordinator has the speaker). When it fires the
+coordinator beeps and announces "your timer is finished".
+
 ## Running the main board as daemons
 
 [`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as

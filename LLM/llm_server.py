@@ -58,6 +58,7 @@ if LIGHTS:
     DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
+DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes."
 
 
 def build_tools():
@@ -78,6 +79,12 @@ def build_tools():
             "description": f"Get the current weather in {WEATHER_LOC}.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }})
+    tools.append({"type": "function", "function": {
+        "name": "set_timer",
+        "description": "Start a timer for a number of minutes.",
+        "parameters": {"type": "object", "properties": {
+            "minutes": {"type": "number"}}, "required": ["minutes"]},
+    }})
     return tools or None
 
 
@@ -112,34 +119,54 @@ def execute_light(light, state):
         return False, str(exc)
 
 
+def _fmt_duration(secs):
+    if secs % 60 == 0:
+        m = secs // 60
+        return f"{m} minute" + ("" if m == 1 else "s")
+    if secs < 60:
+        return f"{secs} seconds"
+    return f"{secs // 60} minutes {secs % 60} seconds"
+
+
 def handle_tool_calls(calls):
-    """Run each tool call; return a short spoken confirmation."""
-    parts = []
+    """Run action tool calls; return (spoken confirmation, control events).
+
+    Control events are JSON dicts forwarded to the client (e.g. a timer the
+    client schedules locally, since only it has the speaker).
+    """
+    parts, controls = [], []
     for call in calls:
-        if call.get("name") != "set_light":
-            parts.append("Sorry, I can't do that.")
-            continue
+        name = call.get("name")
         args = call.get("arguments") or {}
-        light, state = args.get("light"), args.get("state")
-        targets = list(LIGHTS) if light == "all" else [light]
-        failed = []
-        for t in targets:
-            ok, err = execute_light(t, state)
-            print(f"[tool] set_light({t}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
-                  flush=True)
-            if not ok:
-                failed.append(t)
-        if light == "all":
-            if not failed:
-                parts.append(f"Okay, I've turned all the lights {state}.")
+        if name == "set_light":
+            light, state = args.get("light"), args.get("state")
+            targets = list(LIGHTS) if light == "all" else [light]
+            failed = []
+            for t in targets:
+                ok, err = execute_light(t, state)
+                print(f"[tool] set_light({t}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
+                      flush=True)
+                if not ok:
+                    failed.append(t)
+            if light == "all":
+                parts.append(f"Okay, I've turned all the lights {state}." if not failed
+                             else "Sorry, I couldn't reach the " + " and ".join(failed) + " light.")
+            elif not failed:
+                parts.append(f"Okay, I've turned the {light} light {state}.")
             else:
-                parts.append("Sorry, I couldn't reach the "
-                             + " and ".join(failed) + " light.")
-        elif not failed:
-            parts.append(f"Okay, I've turned the {light} light {state}.")
+                parts.append(f"Sorry, I couldn't reach the {light} light.")
+        elif name == "set_timer":
+            try:
+                secs = max(1, int(round(float(args.get("minutes")) * 60)))
+            except (TypeError, ValueError):
+                parts.append("Sorry, I didn't catch the timer length.")
+                continue
+            controls.append({"type": "timer", "seconds": secs})
+            print(f"[tool] set_timer({secs}s)", flush=True)
+            parts.append(f"Okay, timer set for {_fmt_duration(secs)}.")
         else:
-            parts.append(f"Sorry, I couldn't reach the {light} light.")
-    return " ".join(parts) if parts else "Okay."
+            parts.append("Sorry, I can't do that.")
+    return (" ".join(parts) if parts else "Okay."), controls
 
 
 def run_tool(call):
@@ -329,8 +356,11 @@ def run_turn(conn, tts_url, prompt, history, model):
                             events.put(("clause", tail))
                         tool_reply = "".join(collected)
                     else:
-                        # Action tool (set_light): speak a fixed confirmation.
-                        tool_reply = handle_tool_calls(val)
+                        # Action tools (set_light/set_timer): fixed confirmation,
+                        # plus any control events for the client (e.g. a timer).
+                        tool_reply, controls = handle_tool_calls(val)
+                        for ctrl in controls:
+                            events.put(("control", ctrl))
                         events.put(("llm", tool_reply))
                         clauses, tail = extract_clauses(tool_reply + "\n")
                         for clause in clauses:
@@ -353,7 +383,9 @@ def run_turn(conn, tts_url, prompt, history, model):
     with tts_ws:
         while True:
             kind, payload = events.get()
-            if kind == "llm":
+            if kind == "control":
+                conn.send(json.dumps(payload))     # e.g. {"type":"timer","seconds":N}
+            elif kind == "llm":
                 conn.send(json.dumps({"type": "llm", "text": payload}))
             elif kind == "clause":
                 try:

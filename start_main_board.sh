@@ -24,6 +24,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="$REPO/logs"
 mkdir -p "$LOGDIR"
 
+# Load local secrets (e.g. WEATHERAPI_KEY) so the daemons inherit them.
+[ -f "$REPO/.env.local" ] && { set -a; . "$REPO/.env.local"; set +a; }
+
 RKLLAMA_DIR="$REPO/LLM/rkllama"
 RKLLAMA_MODELS="$(ls -d "$RKLLAMA_DIR"/venv/lib/python*/site-packages/rkllama/config/models 2>/dev/null | head -1)"
 

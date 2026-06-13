@@ -258,6 +258,20 @@ which switches every configured light — *"turn off all the lights"*); the plug
 is switched with `http://<ip>/cm?cmnd=Power%20On|Off`. Add more plugs by adding
 lines here (no code change). Requires the LLM board to reach the plugs' network.
 
+There's also a `get_weather` tool (WeatherAPI). Ask *"what's the weather?"* and
+the model calls it; `llm_server.py` fetches the current conditions, feeds the
+`current` block back to the model, and the model answers in natural speech.
+Location is set under `weather:` in [`config.yaml`](config.yaml); the **API key
+is not stored in the repo** — put it in `.env.local` (gitignored), which
+`start_main_board.sh` loads into the environment:
+
+```bash
+echo 'WEATHERAPI_KEY=your_key_here' > .env.local
+```
+
+(Unlike `set_light`, which speaks a fixed confirmation, data tools like
+`get_weather` do a tool-result round-trip so the model phrases the reply.)
+
 ## Running the main board as daemons
 
 [`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as

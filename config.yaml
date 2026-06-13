@@ -49,6 +49,11 @@ lights:
   bed: 192.168.188.22
   tv: 192.168.188.29
 
+# Weather tool (WeatherAPI). The API key is NOT stored here — set WEATHERAPI_KEY
+# in .env.local (gitignored); start_main_board.sh loads it into the environment.
+weather:
+  location: Fulda
+
 llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b

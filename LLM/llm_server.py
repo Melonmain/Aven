@@ -23,6 +23,7 @@ Run:  python llm_server.py                       # uses config.yaml
 
 import argparse
 import json
+import os
 import pathlib
 import queue
 import sys
@@ -46,35 +47,56 @@ DEFAULT_MODEL = _CFG["llm"]["model"]
 DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
 KEEPALIVE_MIN = _CFG["llm"].get("keepalive_minutes", 0)
 
-# --- Smart-home tools (Tasmota plugs) ---------------------------------------
+# --- Tools (Tasmota plugs + weather) ----------------------------------------
 LIGHTS = _CFG.get("lights", {}) or {}
+WEATHER = _CFG.get("weather", {}) or {}
+WEATHER_KEY = os.environ.get("WEATHERAPI_KEY")          # from .env.local, not the repo
+WEATHER_LOC = WEATHER.get("location", "Fulda")
+WEATHER_ENABLED = bool(WEATHER and WEATHER_KEY)
 
 if LIGHTS:
     DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
+if WEATHER_ENABLED:
+    DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
 
 
 def build_tools():
-    """OpenAI tool spec for set_light, with the light names from config."""
-    if not LIGHTS:
-        return None
-    return [{
-        "type": "function",
-        "function": {
+    """OpenAI tool specs for the enabled tools."""
+    tools = []
+    if LIGHTS:
+        tools.append({"type": "function", "function": {
             "name": "set_light",
             "description": "Turn a light on or off.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "light": {"type": "string", "enum": list(LIGHTS) + ["all"]},
-                    "state": {"type": "string", "enum": ["on", "off"]},
-                },
-                "required": ["light", "state"],
-            },
-        },
-    }]
+            "parameters": {"type": "object", "properties": {
+                "light": {"type": "string", "enum": list(LIGHTS) + ["all"]},
+                "state": {"type": "string", "enum": ["on", "off"]},
+            }, "required": ["light", "state"]},
+        }})
+    if WEATHER_ENABLED:
+        tools.append({"type": "function", "function": {
+            "name": "get_weather",
+            "description": f"Get the current weather in {WEATHER_LOC}.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }})
+    return tools or None
 
 
 TOOLS = build_tools()
+
+
+def get_weather():
+    """Fetch current weather; return the 'current' block as a JSON string."""
+    try:
+        r = requests.get("http://api.weatherapi.com/v1/current.json", timeout=8,
+                         params={"key": WEATHER_KEY, "q": WEATHER_LOC, "aqi": "no"})
+        r.raise_for_status()
+        data = r.json()
+        print(f"[tool] get_weather({WEATHER_LOC}) -> ok", flush=True)
+        return json.dumps({"location": data.get("location", {}).get("name", WEATHER_LOC),
+                           "current": data.get("current", {})})
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[tool] get_weather({WEATHER_LOC}) -> FAIL: {exc}", flush=True)
+        return json.dumps({"error": f"weather unavailable: {exc}"})
 
 
 def execute_light(light, state):
@@ -118,6 +140,19 @@ def handle_tool_calls(calls):
         else:
             parts.append(f"Sorry, I couldn't reach the {light} light.")
     return " ".join(parts) if parts else "Okay."
+
+
+def run_tool(call):
+    """Execute a tool and return its result as a string (for the model)."""
+    name = call.get("name")
+    args = call.get("arguments") or {}
+    if name == "get_weather":
+        return get_weather()
+    if name == "set_light":
+        ok, err = execute_light(args.get("light"), args.get("state"))
+        return json.dumps({"ok": ok, "light": args.get("light"),
+                           "state": args.get("state"), "error": err})
+    return json.dumps({"error": f"unknown tool {name}"})
 
 
 # --- Clause chunking --------------------------------------------------------
@@ -183,7 +218,10 @@ def stream_llm(messages, model, tools=None):
             tcs = delta.get("tool_calls")
             if tcs:
                 for tc in tcs:
-                    acc = tool_acc.setdefault(tc.get("index", 0), {"name": "", "arguments": ""})
+                    acc = tool_acc.setdefault(tc.get("index", 0),
+                                              {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        acc["id"] = tc["id"]
                     fn = tc.get("function") or {}
                     if fn.get("name"):
                         acc["name"] = fn["name"]
@@ -204,7 +242,7 @@ def stream_llm(messages, model, tools=None):
                 args = json.loads(acc["arguments"]) if acc["arguments"] else {}
             except json.JSONDecodeError:
                 args = {}
-            calls.append({"name": acc["name"], "arguments": args})
+            calls.append({"id": acc.get("id", ""), "name": acc["name"], "arguments": args})
         yield ("tool", calls)
 
 
@@ -255,16 +293,43 @@ def run_turn(conn, tts_url, prompt, history, model):
                     for clause in clauses:
                         events.put(("clause", clause))
                 elif kind == "tool":
-                    # Run the tool(s), then speak a confirmation instead of a
-                    # generated reply.
-                    tool_reply = handle_tool_calls(val)
-                    events.put(("llm", tool_reply))
-                    clauses, tail = extract_clauses(tool_reply + "\n")
-                    for clause in clauses:
-                        events.put(("clause", clause))
-                    if tail.strip():
-                        events.put(("clause", tail.strip()))
-                    collected = [tool_reply]
+                    if any(c.get("name") == "get_weather" for c in val):
+                        # Data tool: feed the result back so the model answers in
+                        # words (a second, tool-less completion -> streamed reply).
+                        history.append({
+                            "role": "assistant", "content": None,
+                            "tool_calls": [{
+                                "id": c.get("id") or f"call_{i}", "type": "function",
+                                "function": {"name": c["name"],
+                                             "arguments": json.dumps(c.get("arguments") or {})},
+                            } for i, c in enumerate(val)],
+                        })
+                        for i, c in enumerate(val):
+                            history.append({"role": "tool",
+                                            "tool_call_id": c.get("id") or f"call_{i}",
+                                            "content": run_tool(c)})
+                        for kind2, val2 in stream_llm(history, model, None):
+                            if kind2 == "text":
+                                collected.append(val2)
+                                events.put(("llm", val2))
+                                buf += val2
+                                clauses, buf = extract_clauses(buf)
+                                for clause in clauses:
+                                    events.put(("clause", clause))
+                        tail = buf.strip()
+                        if tail:
+                            events.put(("clause", tail))
+                        tool_reply = "".join(collected)
+                    else:
+                        # Action tool (set_light): speak a fixed confirmation.
+                        tool_reply = handle_tool_calls(val)
+                        events.put(("llm", tool_reply))
+                        clauses, tail = extract_clauses(tool_reply + "\n")
+                        for clause in clauses:
+                            events.put(("clause", clause))
+                        if tail.strip():
+                            events.put(("clause", tail.strip()))
+                        collected = [tool_reply]
             if tool_reply is None:
                 tail = buf.strip()
                 if tail:

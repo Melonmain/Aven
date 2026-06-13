@@ -58,7 +58,7 @@ if LIGHTS:
     DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
-DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes."
+DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes, and get_time for the current time."
 
 
 def build_tools():
@@ -84,6 +84,11 @@ def build_tools():
         "description": "Start a timer for a number of minutes.",
         "parameters": {"type": "object", "properties": {
             "minutes": {"type": "number"}}, "required": ["minutes"]},
+    }})
+    tools.append({"type": "function", "function": {
+        "name": "get_time",
+        "description": "Get the current local time.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
     }})
     return tools or None
 
@@ -164,6 +169,10 @@ def handle_tool_calls(calls):
             controls.append({"type": "timer", "seconds": secs})
             print(f"[tool] set_timer({secs}s)", flush=True)
             parts.append(f"Okay, timer set for {_fmt_duration(secs)}.")
+        elif name == "get_time":
+            now = time.strftime("%I:%M %p").lstrip("0")
+            print(f"[tool] get_time -> {now}", flush=True)
+            parts.append(f"It's {now}.")
         else:
             parts.append("Sorry, I can't do that.")
     return (" ".join(parts) if parts else "Okay."), controls

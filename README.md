@@ -278,6 +278,9 @@ minutes"*. The LLM node confirms ("timer set for 5 minutes") and sends a
 schedules it locally (only the coordinator has the speaker). When it fires the
 coordinator beeps and announces "your timer is finished".
 
+A `get_time` tool answers *"what time is it?"* with the board's local time
+(spoken directly, no round-trip).
+
 ## Running the main board as daemons
 
 [`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as

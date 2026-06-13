@@ -99,7 +99,7 @@ wakeword:
 # LLM -> play). Runs on the device with the mic + speakers.
 coordinator:
   max_record_seconds: 10.0   # hard safety cap on one utterance
-  silence_timeout: 0.8       # stop once this much non-speech follows your words
+  silence_timeout: 0.4       # stop once this much non-speech follows your words
   min_record_seconds: 0.3    # ignore blips shorter than this
   # End-pointing uses webrtcvad; aggressiveness 0 (lax) .. 3 (strict about
   # calling audio speech). energy_threshold is the fallback if vad is missing.

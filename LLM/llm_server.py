@@ -176,19 +176,22 @@ def play_music(query):
 
 
 def stop_music():
-    """Pause whatever is playing on Spotify."""
+    """Pause whatever is playing on Spotify (target the active device explicitly)."""
     if not SPOTIFY_ENABLED:
         return "Spotify isn't set up."
     try:
         sp, auth = _spotify()
         if not auth.cache_handler.get_cached_token():
             return "Spotify isn't authorized yet."
-        sp.pause_playback()
-        print("[tool] stop_music -> paused", flush=True)
+        cur = sp.current_playback()
+        if not cur or not cur.get("is_playing"):
+            return "Nothing is playing."
+        sp.pause_playback(device_id=cur["device"]["id"])
+        print(f"[tool] stop_music -> paused {cur['device']['name']}", flush=True)
         return "Okay, I've stopped the music."
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] stop_music -> {exc}", flush=True)
-        return "Nothing is playing."
+        return "Sorry, I couldn't stop the music."
 
 
 def execute_light(light, state):

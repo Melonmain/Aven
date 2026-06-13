@@ -48,12 +48,7 @@ DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
 LIGHTS = _CFG.get("lights", {}) or {}
 
 if LIGHTS:
-    DEFAULT_SYSTEM += (
-        " You can switch these smart lights with the set_light tool: "
-        + ", ".join(LIGHTS) + ", or 'all' for every light at once. Call set_light "
-        "whenever the user asks to turn a light on or off; do not ask for "
-        "confirmation."
-    )
+    DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
 
 
 def build_tools():
@@ -64,12 +59,11 @@ def build_tools():
         "type": "function",
         "function": {
             "name": "set_light",
-            "description": "Turn one of the smart lights on or off.",
+            "description": "Turn a light on or off.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "light": {"type": "string", "enum": list(LIGHTS) + ["all"],
-                              "description": "which light to switch ('all' = every light)"},
+                    "light": {"type": "string", "enum": list(LIGHTS) + ["all"]},
                     "state": {"type": "string", "enum": ["on", "off"]},
                 },
                 "required": ["light", "state"],

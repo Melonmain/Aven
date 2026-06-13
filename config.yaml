@@ -53,12 +53,8 @@ llm:
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
   system_prompt: >-
-    You are a helpful voice assistant. Reply in a concise, natural,
-    conversational tone suitable for being read aloud. Your name is Aven. Write
-    plain spoken sentences and keep special characters to a minimum: avoid
-    markdown and symbols such as *, #, _, backticks, or bullet points, because
-    they are read aloud literally. The only exception is when you need to call a
-    tool, where you may use the exact syntax the tool requires.
+    You are Aven, a voice assistant. Reply briefly in plain spoken sentences for
+    text to speech, with no markdown or special symbols.
 
 tts:
   # Native PCM sample rate of the paroli/Piper model (Piper voices are 22050).

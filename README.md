@@ -290,7 +290,8 @@ Pebble via an ALSA `dmix` (`/etc/asound.conf`), so they don't fight over the DAC
 
 The `play_music` tool then lets you say *"play some Daft Punk"* — `llm_server`
 searches the Spotify Web API (via `spotipy`), finds the `Aven` device, and starts
-playback. It's **off until you add credentials**:
+playback. `stop_music` (*"stop the music"*) pauses it. Both are **off until you
+add credentials**:
 
 1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard),
    Redirect URI `http://127.0.0.1:8888/callback`.

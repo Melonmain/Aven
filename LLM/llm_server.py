@@ -65,7 +65,7 @@ if LIGHTS:
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
 if SPOTIFY_ENABLED:
-    DEFAULT_SYSTEM += " Use play_music to play a song or artist on Spotify."
+    DEFAULT_SYSTEM += " Use play_music to play music and stop_music to stop it on Spotify."
 DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes, and get_time for the current time."
 
 
@@ -105,6 +105,11 @@ def build_tools():
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "song or artist to play"}},
                 "required": ["query"]},
+        }})
+        tools.append({"type": "function", "function": {
+            "name": "stop_music",
+            "description": "Stop or pause the music.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         }})
     return tools or None
 
@@ -168,6 +173,22 @@ def play_music(query):
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] play_music({query!r}) -> FAIL: {exc}", flush=True)
         return "Sorry, I couldn't play that on Spotify."
+
+
+def stop_music():
+    """Pause whatever is playing on Spotify."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        sp.pause_playback()
+        print("[tool] stop_music -> paused", flush=True)
+        return "Okay, I've stopped the music."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] stop_music -> {exc}", flush=True)
+        return "Nothing is playing."
 
 
 def execute_light(light, state):
@@ -234,6 +255,8 @@ def handle_tool_calls(calls):
             parts.append(f"It's {now}.")
         elif name == "play_music":
             parts.append(play_music(args.get("query", "")))
+        elif name == "stop_music":
+            parts.append(stop_music())
         else:
             parts.append("Sorry, I can't do that.")
     return (" ".join(parts) if parts else "Okay."), controls

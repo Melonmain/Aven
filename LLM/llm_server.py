@@ -66,7 +66,8 @@ if LIGHTS:
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
 if SPOTIFY_ENABLED:
-    DEFAULT_SYSTEM += " Use play_music to play music and stop_music to stop it on Spotify."
+    DEFAULT_SYSTEM += (" Use play_music to play music, resume_music to continue"
+                      " paused music, and stop_music to stop it on Spotify.")
 DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes, and get_time for the current time."
 
 
@@ -106,6 +107,11 @@ def build_tools():
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "song or artist to play"}},
                 "required": ["query"]},
+        }})
+        tools.append({"type": "function", "function": {
+            "name": "resume_music",
+            "description": "Resume or continue paused music.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         }})
         tools.append({"type": "function", "function": {
             "name": "stop_music",
@@ -176,6 +182,33 @@ def play_music(query):
         return "Sorry, I couldn't play that on Spotify."
 
 
+def resume_music():
+    """Resume the last Spotify playback (whatever was playing before it paused)."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        cur = sp.current_playback()
+        if cur and cur.get("is_playing"):
+            return "Music is already playing."
+        # Prefer the Aven Connect device; otherwise the device the last
+        # playback was on, so resume lands somewhere audible.
+        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
+                       if d.get("name") == SPOTIFY_DEVICE), None)
+        if not dev_id and cur:
+            dev_id = cur.get("device", {}).get("id")
+        if not dev_id:
+            return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
+        sp.start_playback(device_id=dev_id)  # no uris -> resume last context
+        print(f"[tool] resume_music -> resumed on {SPOTIFY_DEVICE}", flush=True)
+        return "Okay, resuming the music."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] resume_music -> {exc}", flush=True)
+        return "Sorry, there's nothing for me to resume."
+
+
 def stop_music():
     """Pause whatever is playing on Spotify (target the active device explicitly)."""
     if not SPOTIFY_ENABLED:
@@ -201,11 +234,19 @@ def stop_music():
 _STOP_RE = re.compile(
     r"^\s*(stop|pause|quiet|be quiet|shut up|halt)"
     r"( (the )?(music|song|playback|playing|spotify))?\s*[.!]*\s*$", re.I)
+_RESUME_RE = re.compile(
+    r"^\s*(continue|resume|unpause|carry on|keep (playing|going))"
+    r"( (the )?(music|song|playback|playing|spotify))?\s*[.!]*\s*$", re.I)
 
 
 def quick_intent(prompt):
-    if SPOTIFY_ENABLED and _STOP_RE.match(prompt or ""):
+    if not SPOTIFY_ENABLED:
+        return None
+    p = prompt or ""
+    if _STOP_RE.match(p):
         return stop_music()
+    if _RESUME_RE.match(p):
+        return resume_music()
     return None
 
 
@@ -273,6 +314,8 @@ def handle_tool_calls(calls):
             parts.append(f"It's {now}.")
         elif name == "play_music":
             parts.append(play_music(args.get("query", "")))
+        elif name == "resume_music":
+            parts.append(resume_music())
         elif name == "stop_music":
             parts.append(stop_music())
         else:

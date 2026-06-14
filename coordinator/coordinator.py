@@ -445,6 +445,42 @@ def record_utterance(stream, cc, channels, vad):
     return b"".join(frames)
 
 
+def _open_mic(sd, device, refresh=True):
+    """Open the mic and return (stream, channels), blocking until it's there.
+
+    Makes the mic hot-pluggable: a transient unplug reconnects instead of
+    crashing. PortAudio caches its device list at init, so a replugged USB mic
+    isn't visible until we _terminate/_initialize it. The PS3 Eye is a 4-mic
+    array; we keep its native channel count and downmix to channel 0 later.
+    """
+    delay, warned = 1.0, False
+    while True:
+        if refresh:
+            try:
+                sd._terminate(); sd._initialize()   # re-scan for hot-plugged devices
+            except Exception:
+                pass
+        try:
+            channels = 1
+            if device is not None:
+                try:
+                    channels = max(int(sd.query_devices(device)["max_input_channels"]), 1)
+                except Exception:
+                    channels = 1
+            stream = sd.RawInputStream(samplerate=RATE, blocksize=FRAME, dtype="int16",
+                                       channels=channels, device=device)
+            stream.start()
+            return stream, channels
+        except Exception as exc:  # noqa: BLE001 — mic absent; wait for it
+            if not warned:
+                log.warning("MIC  : not available (%s); waiting…", exc)
+                print(f"{YELLOW}mic not available — waiting…{RESET}", flush=True)
+                warned = True
+            time.sleep(delay)
+            delay = min(delay * 1.5, 5.0)
+            refresh = True
+
+
 def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=None):
     import sounddevice as sd
     from openwakeword.model import Model
@@ -455,28 +491,21 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     except Exception:
         model = Model(inference_framework="onnx")
 
-    # Match the mic's native channel count (the PS3 Eye is a 4-mic array); we
-    # downmix to channel 0. openWakeWord/STT want 16 kHz mono.
-    channels = 1
-    if input_device is not None:
-        try:
-            channels = max(int(sd.query_devices(input_device)["max_input_channels"]), 1)
-        except Exception:
-            channels = 1
-
     session = LLMSession(llm_url)
     mem_timeout = cc.get("memory_timeout", 60)
     last_wake = None
     vad = make_vad(cc)
     log.info("end-pointing: %s", "webrtcvad" if vad else "energy threshold")
 
+    stream, channels = _open_mic(sd, input_device, refresh=False)
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
           f"(mic {channels}ch; Ctrl+C to quit)")
-    with sd.RawInputStream(samplerate=RATE, blocksize=FRAME, dtype="int16",
-                           channels=channels, device=input_device) as stream:
+    try:
         while True:
-            frame = read_mono(stream, channels)
-            if _score_of(model.predict(frame), model_name) >= threshold:
+            try:
+                frame = read_mono(stream, channels)
+                if _score_of(model.predict(frame), model_name) < threshold:
+                    continue
                 t_wake = time.perf_counter()
                 # New conversation if too long since the previous wake-word.
                 gap = (time.time() - last_wake) if last_wake else None
@@ -512,6 +541,25 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 if hasattr(model, "reset"):
                     model.reset()   # avoid re-triggering on the same audio
                 print(f"{GREEN}listening…{RESET}", flush=True)
+            except sd.PortAudioError as exc:    # mic unplugged mid-read
+                log.warning("MIC  : I/O error (%s) — reconnecting…", exc)
+                print(f"\n{YELLOW}mic disconnected — waiting to reconnect…{RESET}", flush=True)
+                try:
+                    stream.stop(); stream.close()
+                except Exception:
+                    pass
+                time.sleep(0.5)                 # don't hot-spin if it flaps
+                stream, channels = _open_mic(sd, input_device)
+                if hasattr(model, "reset"):
+                    model.reset()
+                log.info("MIC  : reconnected (%dch)", channels)
+                print(f"{GREEN}mic reconnected — listening…{RESET}", flush=True)
+    finally:
+        try:
+            stream.stop(); stream.close()
+        except Exception:
+            pass
+        session.close()
 
 
 # --------------------------------------------------------------------------- #

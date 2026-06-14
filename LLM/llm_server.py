@@ -238,15 +238,35 @@ _RESUME_RE = re.compile(
     r"^\s*(continue|resume|unpause|carry on|keep (playing|going))"
     r"( (the )?(music|song|playback|playing|spotify))?\s*[.!]*\s*$", re.I)
 
+# Lights: match either word order ("turn on the bed light" / "bed light off"),
+# any configured light name plus all/lights/everything -> "all".
+_ALL_WORDS = {"all", "lights", "light", "everything"}
+if LIGHTS:
+    _names = "|".join(map(re.escape, LIGHTS)) + r"|all|lights|light|everything"
+    _LIGHT_RE = re.compile(
+        r"^\s*(?:turn\s+|switch\s+|put\s+)?(?:"
+        r"(?P<state1>on|off)\s+(?:the\s+)?(?P<tgt1>" + _names + r")(?:\s+lights?)?"
+        r"|"
+        r"(?:the\s+)?(?P<tgt2>" + _names + r")(?:\s+lights?)?\s+(?P<state2>on|off)"
+        r")\s*[.!]*\s*$", re.I)
+else:
+    _LIGHT_RE = None
+
 
 def quick_intent(prompt):
-    if not SPOTIFY_ENABLED:
-        return None
+    """Deterministic handling for commands the small model fumbles. Spoken reply or None."""
     p = prompt or ""
-    if _STOP_RE.match(p):
-        return stop_music()
-    if _RESUME_RE.match(p):
-        return resume_music()
+    if SPOTIFY_ENABLED:
+        if _STOP_RE.match(p):
+            return stop_music()
+        if _RESUME_RE.match(p):
+            return resume_music()
+    if _LIGHT_RE is not None:
+        m = _LIGHT_RE.match(p)
+        if m:
+            tgt = (m.group("tgt1") or m.group("tgt2")).lower()
+            state = (m.group("state1") or m.group("state2")).lower()
+            return apply_light("all" if tgt in _ALL_WORDS else tgt, state)
     return None
 
 
@@ -261,6 +281,24 @@ def execute_light(light, state):
         return r.status_code == 200, None
     except requests.RequestException as exc:
         return False, str(exc)
+
+
+def apply_light(light, state):
+    """Switch one light (or 'all'); return the spoken confirmation."""
+    targets = list(LIGHTS) if light == "all" else [light]
+    failed = []
+    for t in targets:
+        ok, err = execute_light(t, state)
+        print(f"[tool] set_light({t}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
+              flush=True)
+        if not ok:
+            failed.append(t)
+    if light == "all":
+        return (f"Okay, I've turned all the lights {state}." if not failed
+                else "Sorry, I couldn't reach the " + " and ".join(failed) + " light.")
+    if not failed:
+        return f"Okay, I've turned the {light} light {state}."
+    return f"Sorry, I couldn't reach the {light} light."
 
 
 def _fmt_duration(secs):
@@ -283,22 +321,7 @@ def handle_tool_calls(calls):
         name = call.get("name")
         args = call.get("arguments") or {}
         if name == "set_light":
-            light, state = args.get("light"), args.get("state")
-            targets = list(LIGHTS) if light == "all" else [light]
-            failed = []
-            for t in targets:
-                ok, err = execute_light(t, state)
-                print(f"[tool] set_light({t}, {state}) -> {'ok' if ok else 'FAIL: ' + str(err)}",
-                      flush=True)
-                if not ok:
-                    failed.append(t)
-            if light == "all":
-                parts.append(f"Okay, I've turned all the lights {state}." if not failed
-                             else "Sorry, I couldn't reach the " + " and ".join(failed) + " light.")
-            elif not failed:
-                parts.append(f"Okay, I've turned the {light} light {state}.")
-            else:
-                parts.append(f"Sorry, I couldn't reach the {light} light.")
+            parts.append(apply_light(args.get("light"), args.get("state")))
         elif name == "set_timer":
             try:
                 secs = max(1, int(round(float(args.get("minutes")) * 60)))

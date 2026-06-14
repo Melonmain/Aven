@@ -123,6 +123,10 @@ coordinator:
   # null = ALSA "default", which /etc/asound.conf routes to a dmix on the Pebble
   # so the assistant (TTS) and Raspotify (Spotify) can share the speaker.
   output_device: null
+  # Hot-plug: when output_device is null, the speaker can be unplugged/replugged
+  # freely. This is the ALSA card id of the USB speaker (see /proc/asound/cards);
+  # if it's absent the reply is generated but its audio is dropped, no crash.
+  speaker_card: V3
   # Keep conversation history across wake-words; reset it once this many seconds
   # pass between two wake-word detections (a new conversation).
   memory_timeout: 60

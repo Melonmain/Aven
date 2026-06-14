@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import pathlib
+import re
 import sys
 import threading
 import time
@@ -52,18 +53,36 @@ PLAYBACK_LOCK = threading.Lock()
 _timers = []  # keep references so scheduled timers aren't garbage-collected
 
 
+def speaker_present(card):
+    """True if an ALSA card with this id is currently plugged in.
+
+    Lets the speaker be hot-pluggable: the USB DAC (and the dmix 'default' that
+    sits on it) appears/disappears as a card in /proc/asound/cards.
+    """
+    if not card:
+        return True
+    try:
+        with open("/proc/asound/cards") as f:
+            data = f.read()
+    except OSError:
+        return True  # can't tell -> assume present, let the open attempt decide
+    return re.search(rf"\[\s*{re.escape(card)}\s*\]", data) is not None
+
+
 # --------------------------------------------------------------------------- #
 # Speaker playback (sounddevice, opened lazily at the rate the LLM/TTS sends)
 # --------------------------------------------------------------------------- #
 class Player:
-    def __init__(self, enabled, device=None):
+    def __init__(self, enabled, device=None, card=None):
         self.enabled = enabled
         self.device = device
+        self.card = card          # ALSA card id to probe for hot-plug (default dev only)
         self._sd = None
         self._stream = None
         self._src_rate = None     # rate of the PCM we're handed
         self._dev_rate = None     # rate the device actually runs at
         self._channels = 1
+        self._warned_absent = False
         if enabled:
             try:
                 import sounddevice as sd
@@ -72,29 +91,54 @@ class Player:
                 print(f"{YELLOW}playback disabled (no audio device): {exc}{RESET}")
                 self.enabled = False
 
-    def begin(self, rate):
-        """Note the source PCM rate; open the device once at ITS native rate.
+    def available(self):
+        """Whether a speaker is currently connected (hot-plug aware).
 
-        USB speakers are usually 44.1/48 kHz only, so we resample our 16/22/24 kHz
-        audio up to the device rate in write() rather than asking it for a rate it
-        can't do (which silently produces nothing on the raw ALSA device).
+        For the default device (output_device: null) this tracks the USB DAC's
+        ALSA card so the speaker can be unplugged/replugged at will. With an
+        explicit device we assume it's there and let the open attempt decide.
+        """
+        if not self.enabled:
+            return False
+        if self.device is None:
+            return speaker_present(self.card)
+        return True
+
+    def begin(self, rate):
+        """Open the speaker for one playback session at ITS native rate.
+
+        Opened per session (and closed by end()) so unplug/replug between
+        replies is picked up. USB speakers are usually 44.1/48 kHz only, so we
+        resample our 16/22/24 kHz audio up to the device rate in write() rather
+        than asking it for a rate it can't do.
         """
         if not self.enabled:
             return
+        if not self.available():
+            if not self._warned_absent:
+                log.info("playback: no speaker connected — dropping audio")
+                self._warned_absent = True
+            return
+        self._warned_absent = False
         self._src_rate = rate
-        if self._stream is None:
-            self._channels, self._dev_rate = 1, rate
-            if self.device is not None:
-                try:
-                    info = self._sd.query_devices(self.device)
-                    self._channels = min(max(int(info["max_output_channels"]), 1), 2)
-                    self._dev_rate = int(info["default_samplerate"])
-                except Exception:
-                    self._channels, self._dev_rate = 1, rate
+        if self._stream is not None:
+            return
+        self._channels, self._dev_rate = 1, rate
+        if self.device is not None:
+            try:
+                info = self._sd.query_devices(self.device)
+                self._channels = min(max(int(info["max_output_channels"]), 1), 2)
+                self._dev_rate = int(info["default_samplerate"])
+            except Exception:
+                self._channels, self._dev_rate = 1, rate
+        try:
             self._stream = self._sd.RawOutputStream(
                 samplerate=self._dev_rate, channels=self._channels, dtype="int16",
                 device=self.device)
             self._stream.start()
+        except Exception as exc:  # speaker vanished between probe and open
+            log.info("playback: couldn't open speaker (%s)", exc)
+            self._stream = None
 
     def write(self, pcm):
         if not (self.enabled and self._stream):
@@ -109,7 +153,7 @@ class Player:
 
     def beep(self, freq=880, ms=140, volume=0.3):
         """Play a short sine 'I heard you' tone through the speaker."""
-        if not self.enabled:
+        if not self.available():
             return
         rate = 16000
         n = int(rate * ms / 1000)
@@ -126,6 +170,8 @@ class Player:
             time.sleep(ms / 1000 + 0.03)          # let it finish before we record
         except Exception:
             pass
+        finally:
+            self.end()
 
     def _close_stream(self):
         if self._stream:
@@ -134,6 +180,11 @@ class Player:
             except Exception:
                 pass
             self._stream = None
+
+    def end(self):
+        """Close the stream after a playback session so the next one re-probes
+        the speaker (this is what makes unplug/replug between turns work)."""
+        self._close_stream()
 
     def close(self):
         self._close_stream()
@@ -207,6 +258,7 @@ def _stream_reply(ws, text, player):
             elif etype == "done":
                 done_t = time.perf_counter()
                 break
+        player.end()                          # release/re-probe speaker for next turn
     print()
 
     audio_s = nbytes / 2 / rate if rate else 0.0
@@ -299,6 +351,8 @@ def tts_say(text, player):
                     break
     except Exception as exc:  # noqa: BLE001
         log.warning("tts_say failed: %s", exc)
+    finally:
+        player.end()
 
 
 def fire_timer(player):
@@ -500,7 +554,9 @@ def main():
     stt_url = f"ws://{stt_host}:{stt_port}"
     llm_url = f"ws://{llm_host}:{llm_port}"
     in_dev, out_dev = _dev(args.input_device), _dev(args.output_device)
-    player = Player(enabled=not args.no_audio, device=out_dev)
+    # When using the default device (null), probe this ALSA card for hot-plug.
+    speaker_card = cc.get("speaker_card", "V3")
+    player = Player(enabled=not args.no_audio, device=out_dev, card=speaker_card)
     print(f"  STT : {stt_url}\n  LLM : {llm_url}")
 
     try:

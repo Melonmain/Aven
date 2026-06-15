@@ -1,0 +1,27 @@
+[Unit]
+Description=Aven voice assistant (rkllama + llm_server + stt + coordinator)
+Documentation=https://github.com/Melonmain/Aven
+# TTS lives on the other board; we just need the network up to reach it.
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=melon
+Group=melon
+WorkingDirectory=/home/melon/Aven
+# uv installs to ~/.local/bin; audio is direct ALSA (/dev/snd, user in 'audio').
+Environment=PATH=/home/melon/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/melon
+# USB devices can enumerate slightly after boot; wait (briefly) for the mic so
+# the coordinator isn't skipped. Always exit 0 so a missing mic never blocks
+# the other services from starting.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do arecord -l 2>/dev/null | grep -q "^card" && break; sleep 1; done; exit 0'
+ExecStart=/home/melon/Aven/start_main_board.sh start
+ExecStop=/home/melon/Aven/start_main_board.sh stop
+# rkllama can take ~60s to load the model; give the whole start room.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

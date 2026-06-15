@@ -88,6 +88,12 @@ start_one() {
     printf "  ${C_Y}[skip]${C_0}  %-11s no capture device — connect the USB mic, then: %s start coordinator\n" \
            "$name" "$0"; return 0
   fi
+  # rkllama's prompt cache can be left corrupt by an unclean shutdown, which
+  # silently makes the model emit one token then stop (empty replies, no error).
+  # Clear it on each start; it's regenerated automatically on first inference.
+  if [ "$name" = rkllama ] && [ -n "$RKLLAMA_MODELS" ]; then
+    rm -rf "$RKLLAMA_MODELS"/*/cache/* 2>/dev/null || true
+  fi
   printf "  [start] %-11s … " "$name"
   launch "$name"
   if [ "$(svc_kind "$name")" = port ]; then

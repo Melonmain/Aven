@@ -11,8 +11,15 @@ These live on the host, outside the repo's runtime. To reproduce on a board:
     sudo systemctl daemon-reload && sudo systemctl restart raspotify
 
 `/etc/raspotify/conf` also needs `LIBRESPOT_NAME="Aven"`, `LIBRESPOT_BACKEND="alsa"`,
-`LIBRESPOT_DEVICE="default"`. The coordinator uses ALSA `default` (config
-`coordinator.output_device: null`).
+`LIBRESPOT_DEVICE="default"`, and `LIBRESPOT_CACHE="/var/cache/raspotify"`. The
+coordinator uses ALSA `default` (config `coordinator.output_device: null`).
+
+`LIBRESPOT_CACHE` is important: without it librespot runs in discovery mode and
+only appears in Spotify's Web API after a phone connects to it once, and that
+registration is lost on every reboot — so `play_music` reports "the Aven speaker
+isn't available". With the cache set, activate "Aven" once from the Spotify app
+(Connect to a device); librespot then persists the credentials and auto-logs-in
+on every boot, staying visible to the API (and the play/continue tools).
 
 ## Auto-start on boot (systemd)
 

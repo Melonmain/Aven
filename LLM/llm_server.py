@@ -11,7 +11,10 @@ This is the node your laptop connects to. For each prompt it:
 So the laptop still talks to ONE endpoint; the LLM<->TTS hop is internal.
 
 Protocol to the laptop (one turn):
-  laptop -> node : {"text": "..."}  or  {"command": "clear"}
+  laptop -> node : {"text": "..."}
+                   {"command": "clear"}                 -> {"type":"cleared"}
+                   {"command": "pause_music"}           -> {"type":"music","paused":bool}
+                   {"command": "resume_music"}          -> {"type":"music","resumed":bool}
   node -> laptop : {"type":"audio_start","sample_rate":N,"channels":1,"sample_width":2}
                    {"type":"llm","text":"<token>"}     (transcript)
                    <binary frames>                     (raw PCM relayed from TTS node)
@@ -226,6 +229,52 @@ def stop_music():
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] stop_music -> {exc}", flush=True)
         return "Sorry, I couldn't stop the music."
+
+
+# Wake-word ducking: the coordinator pauses Spotify the moment the wake word
+# fires (so the music doesn't bleed into the recording) and resumes it once the
+# utterance is sent to STT. These return a bool so the coordinator only resumes
+# what it actually paused — never starting music that wasn't already playing.
+def pause_for_wake():
+    if not SPOTIFY_ENABLED:
+        return False
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return False
+        cur = sp.current_playback()
+        if not cur or not cur.get("is_playing"):
+            return False
+        sp.pause_playback(device_id=cur["device"]["id"])
+        print("[wake] paused Spotify for capture", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[wake] pause failed: {exc}", flush=True)
+        return False
+
+
+def resume_after_wake():
+    if not SPOTIFY_ENABLED:
+        return False
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return False
+        cur = sp.current_playback()
+        if cur and cur.get("is_playing"):
+            return True
+        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
+                       if d.get("name") == SPOTIFY_DEVICE), None)
+        if not dev_id and cur:
+            dev_id = cur.get("device", {}).get("id")
+        if not dev_id:
+            return False
+        sp.start_playback(device_id=dev_id)
+        print("[wake] resumed Spotify after capture", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[wake] resume failed: {exc}", flush=True)
+        return False
 
 
 # Deterministic shortcuts: critical commands the small model fumbles as tool
@@ -627,6 +676,12 @@ def make_handler(tts_url, default_model, system_prompt):
                     history = [{"role": "system", "content": system_prompt}]
                     conn.send(json.dumps({"type": "cleared"}))
                     print(f"[i] {peer}: history cleared", flush=True)
+                    continue
+                if data.get("command") == "pause_music":
+                    conn.send(json.dumps({"type": "music", "paused": pause_for_wake()}))
+                    continue
+                if data.get("command") == "resume_music":
+                    conn.send(json.dumps({"type": "music", "resumed": resume_after_wake()}))
                     continue
                 prompt = (data.get("text") or "").strip()
                 model = data.get("model") or default_model

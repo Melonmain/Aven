@@ -292,6 +292,7 @@ class LLMSession:
     def __init__(self, url):
         self.url = url
         self._ws = None
+        self._lock = threading.Lock()   # serialize ws use (turns vs music commands)
 
     def _ensure(self):
         if self._ws is None:
@@ -310,21 +311,43 @@ class LLMSession:
     def clear(self):
         """Drop the server-side history (start a new conversation)."""
         from websockets.exceptions import ConnectionClosed
-        if self._ws is None:
-            return
-        try:
-            self._ws.send(json.dumps({"command": "clear"}))
-            self._ws.recv()   # consume the {"type":"cleared"} ack
-        except (ConnectionClosed, OSError):
-            self._reset()
+        with self._lock:
+            if self._ws is None:
+                return
+            try:
+                self._ws.send(json.dumps({"command": "clear"}))
+                self._ws.recv()   # consume the {"type":"cleared"} ack
+            except (ConnectionClosed, OSError):
+                self._reset()
+
+    def _command(self, name, ack_key):
+        """Send a control command and return its boolean ack field (False on error)."""
+        from websockets.exceptions import ConnectionClosed
+        with self._lock:
+            try:
+                ws = self._ensure()
+                ws.send(json.dumps({"command": name}))
+                return bool(json.loads(ws.recv()).get(ack_key))
+            except (ConnectionClosed, OSError, ValueError):
+                self._reset()
+                return False
+
+    def pause_music(self):
+        """Pause Spotify for a capture; True iff something was actually paused."""
+        return self._command("pause_music", "paused")
+
+    def resume_music(self):
+        """Resume what pause_music() paused."""
+        return self._command("resume_music", "resumed")
 
     def turn(self, text, player):
         from websockets.exceptions import ConnectionClosed
-        try:
-            return _stream_reply(self._ensure(), text, player)
-        except (ConnectionClosed, OSError):
-            self._reset()   # reconnect (fresh history) on the next turn
-            raise
+        with self._lock:
+            try:
+                return _stream_reply(self._ensure(), text, player)
+            except (ConnectionClosed, OSError):
+                self._reset()   # reconnect (fresh history) on the next turn
+                raise
 
     def close(self):
         self._reset()
@@ -516,11 +539,25 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 log.info("WAKE : '%s' detected%s", model_name,
                          "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
+                # Duck Spotify while we capture, so it doesn't bleed into the
+                # recording. Backgrounded so the beep isn't delayed by the API
+                # round-trip; the resume waits for this to settle first.
+                paused = {"v": False}
+                pause_t = threading.Thread(
+                    target=lambda: paused.update(v=session.pause_music()), daemon=True)
+                pause_t.start()
                 with PLAYBACK_LOCK:
                     player.beep()
                 pcm = record_utterance(stream, cc, channels, vad)
                 log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured",
                          time.perf_counter() - t_wake, len(pcm) / 2 / RATE)
+
+                # Audio is going to STT now -> resume whatever we paused.
+                def _resume():
+                    pause_t.join(timeout=5)
+                    if paused["v"]:
+                        session.resume_music()
+                threading.Thread(target=_resume, daemon=True).start()
                 try:
                     text = transcribe(stt_url, pcm, RATE)
                 except Exception as exc:  # noqa: BLE001

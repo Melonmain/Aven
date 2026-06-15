@@ -1,327 +1,138 @@
-# Aven — Rockchip-based AI Assistant
+# Aven — a Rockchip NPU voice assistant
 
-A voice-assistant pipeline built as **microservices** so each stage can run on
-its own Rock 5C and use the **NPU** (LLM, TTS) or the **CPU** (STT, wakeword).
-The **LLM** and **TTS** stages are wired end-to-end; the **STT** (faster-whisper)
-and **wakeword** (openWakeWord) stages exist as standalone CPU services and are
-being wired into the full voice loop:
+Aven is a self-hosted voice assistant that runs entirely on **Rock 5C** boards
+(RK3588). You say *"hey jarvis"*, ask a question or give a command, and it
+answers in a natural voice — using the **NPU** for the heavy stages (LLM, TTS)
+and the **CPU** for the light ones (wakeword, speech-to-text). No cloud, no
+accounts (except optional Spotify), nothing leaves your network.
 
-```
-  mic ─▶ wakeword (CPU) ─▶ STT (CPU) ─▶ LLM (NPU) ─▶ TTS (NPU/CPU) ─▶ speaker
-       "hey jarvis"      faster-whisper   rkllama      paroli/kokoro/piper
-```
+It's built as **microservices** wired over WebSockets, so each stage can live on
+its own board and the load spreads across two NPUs. One board runs the brain
+(wakeword + STT + LLM + the mic/speaker loop); a second board runs text-to-speech.
 
-```
-  connector (laptop)
-        │  ws://…:8765   {"text": "..."}
-        ▼
-  LLM node  (main Rock 5C, 100.108.158.94)
-    ├── rkllama  (NPU LLM, http://127.0.0.1:8080)   ← Qwen2.5-3B
-    └── llm_server.py  streams tokens → clauses
-        │  ws://…:8766   {"text": "a clause"}
-        ▼
-  TTS node  (second Rock 5C, 100.113.61.126)
-    ├── voice_server.py
-    └── paroli-server  (NPU VITS, ws://127.0.0.1:8848)
-        │  raw PCM relayed back up the chain
-        ▼
-  connector plays the audio as it arrives
-```
+**What it can do:** answer questions, control Tasmota smart plugs (*"turn off the
+bed light"*), report the weather and time, set timers, and play/stop/resume
+Spotify — all by voice, with conversation memory across turns.
 
-> ⚠️ The TTS node runs on a **separate** Rock 5C. Don't run the LLM and TTS
-> servers on the same board at the same time (they each want the NPU).
+## How it works
 
-## Layout
+Everything is driven by the **coordinator** on the main board: it owns the mic
+and speaker, listens for the wake word locally, and orchestrates the remote
+stages over WebSockets. The **LLM node** (`llm_server`) is the hub — it talks to
+the NPU model (`rkllama`), runs tool calls, and drives the **TTS node** on the
+second board, relaying the synthesized audio back to the coordinator to play.
 
-| Path                 | What runs there                          | UV project        |
-|----------------------|------------------------------------------|-------------------|
-| `config.yaml`        | Shared topology + settings (edit this)   | —                 |
-| `config.py`          | Tiny loader imported by every service    | —                 |
-| `connector.py`       | Test client (laptop)                     | `./pyproject.toml`|
-| `LLM/llm_server.py`  | LLM orchestrator (main Rock 5C)          | `LLM/`            |
-| `LLM/rkllama/`       | NPU LLM backend (submodule)              | `LLM/rkllama/`    |
-| `TTS/voice_server.py`| TTS node (second Rock 5C)                | `TTS/`            |
-| `TTS/paroli/`        | NPU TTS backend (submodule, C++)         | built separately  |
-| `STT/stt_server.py`  | STT node (faster-whisper, CPU)           | `STT/`            |
-| `wakeword/wakeword_listener.py` | Wakeword (openWakeWord, CPU)  | `wakeword/`       |
-| `coordinator/coordinator.py` | Full voice loop client (mic→…→speaker) | `coordinator/` |
+```mermaid
+flowchart TB
+    mic([🎤 USB mic · PS3 Eye]):::hw
+    spk([🔊 Pebble V3 speaker]):::hw
 
-Every service reads the **single `config.yaml`** at the repo root, so there are
-no hardcoded IPs in the code. Change a host/port once, everywhere picks it up.
+    subgraph main["🧠 Main Rock 5C · 100.108.158.94"]
+        direction TB
+        coord["<b>coordinator.py</b><br/>wake word · record · playback"]
+        ww{{"openWakeWord<br/>'hey jarvis' · CPU"}}
+        stt["<b>stt_server</b> :8767<br/>faster-whisper · CPU"]
+        llm["<b>llm_server</b> :8765<br/>orchestrator + tools"]
+        rk["<b>rkllama</b> :8080<br/>Qwen2.5-3B · NPU"]
+        rasp["Raspotify / librespot<br/>Spotify Connect 'Aven'"]
 
-## Requirements
+        coord -.->|frames| ww
+        coord -->|PCM| stt -->|transcript| coord
+        coord -->|text| llm
+        llm <-->|HTTP| rk
+    end
 
-- [UV](https://docs.astral.sh/uv/) (already installed)
-- Submodules checked out: `git submodule update --init --recursive`
+    subgraph ttsb["🗣 TTS Rock 5C · 100.113.61.126"]
+        direction TB
+        voice["<b>voice_server</b> :8766"]
+        engine["paroli / kokoro / piper<br/>NPU or CPU"]
+        voice <--> engine
+    end
 
-## 1. LLM node (main Rock 5C — 100.108.158.94)
+    tools["🛠 Tools<br/>lights · weather · timer<br/>time · play/stop/resume music"]
 
-rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312).
-It can't be launched with `uv run` directly — rkllama's pyproject declares its
-NPU wheel with a relative `file:./…` URL that uv refuses to parse — so
-`setup_rkllama.sh` installs it into a local venv (rewriting that URL to absolute
-just for the install) and you run it from that venv. The orchestrator is a
-separate, lightweight UV project that only talks to rkllama over HTTP.
+    mic --> coord
+    llm -.->|tool calls| tools
+    llm ==>|clause text| voice
+    voice ==>|PCM| llm
+    llm ==>|transcript + PCM| coord
+    coord ==>|audio| spk
+    rasp -->|ALSA dmix| spk
 
-```bash
-# a) one-time: install rkllama into LLM/rkllama/venv (downloads torch etc. — large)
-bash LLM/setup_rkllama.sh
-
-# b) rkllama NPU backend (serves http://0.0.0.0:8080)
-cd LLM/rkllama && ./venv/bin/rkllama_server
-
-# c) one-time: pull the model (in a second shell, server must be running)
-cd LLM/rkllama && ./venv/bin/rkllama_client pull \
-  c01zaut/Qwen2.5-3B-Instruct-rk3588-1.1.1/Qwen2.5-3B-Instruct-rk3588-w8a8-opt-0-hybrid-ratio-0.5.rkllm/qwen2.5-3b
-# → the local model becomes "qwen2.5-3b" (matches llm.model in config.yaml)
-
-# d) the orchestrator
-cd LLM
-uv sync
-uv run python llm_server.py                  # serves ws://0.0.0.0:8765
+    classDef hw fill:#1f2937,stroke:#9ca3af,color:#fff;
 ```
 
-## 2. TTS node (second Rock 5C — 100.113.61.126)
+A single turn, end to end:
 
-`paroli-server` is a C++ NPU engine. `setup_paroli.sh` builds it and fetches a
-voice in one shot (idempotent; prompts for sudo once for apt + the NPU runtime):
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant C as coordinator
+    participant S as STT
+    participant L as llm_server
+    participant R as rkllama (NPU)
+    participant T as TTS node
+    participant K as speaker
 
-The script auto-adapts to the board's OS: on trixie it installs the packaged
-`libdrogon-dev`; on Debian **bookworm** (where Drogon isn't packaged) it builds
-Drogon from source automatically (first run takes a few minutes longer).
-
-```bash
-# a) one-time build + voice download (default voice: ljspeech)
-bash TTS/setup_paroli.sh
-
-# b) start the NPU engine (wrapper sets LD_LIBRARY_PATH + model paths for you)
-TTS/paroli/build/run-paroli-server.sh         # serves ws://127.0.0.1:8848
-
-# c) the TTS WebSocket node
-cd TTS
-uv sync
-uv run python voice_server.py                # serves ws://0.0.0.0:8766
-
-# d) verify (writes test_output.wav)
-uv run python test_tts.py --host 127.0.0.1
+    U->>C: "hey jarvis"
+    C->>C: wake match → 🔔 beep
+    U->>C: spoken request
+    C->>C: record until you stop (VAD)
+    C->>S: utterance PCM
+    S-->>C: transcript
+    C->>L: text
+    Note over L: deterministic shortcut?<br/>("stop" / "continue" / "lights on")
+    alt shortcut hits
+        L->>L: run action directly (no model)
+    else ask the model
+        L->>R: chat completion (+ tools)
+        alt model calls a tool
+            R-->>L: tool_call
+            L->>L: run tool → confirmation<br/>(weather feeds result back)
+        else plain answer
+            R-->>L: token stream
+        end
+    end
+    L->>T: clause text (streamed)
+    T-->>L: PCM audio
+    L-->>C: transcript + PCM
+    C->>K: play as it arrives 🔊
 ```
 
-### 2b. TTSV2 — kokoro-server (improved voice, optional)
+**Why clauses?** `llm_server` splits the model's token stream into speakable
+clauses on the fly and pipes each to TTS as soon as it's ready, so audio starts
+playing while the model is still talking — much lower latency than waiting for
+the full reply.
 
-[`TTSV2/`](TTSV2/) is a drop-in alternative to paroli backed by
-[kokoro-server](https://github.com/marty1885/kokoro-server) (Kokoro-82M). It
-listens on the **same** `services.tts` port (8766) and speaks the same protocol,
-so the LLM node reaches it unchanged — run **either** paroli **or** kokoro.
+> ⚠️ The TTS node runs on a **separate** board. Don't run the LLM and TTS
+> engines on the same board at once — they each want the NPU.
 
-```bash
-# a) build the C++ engine (auto-handles trixie vs bookworm Drogon)
-bash TTSV2/setup_kokoro.sh
-```
+## Repo layout
 
-⚠️ **Models are not downloadable.** kokoro's encoder/har/decoder ONNX, the RKNN
-decoder, and `voices_npy/` must be generated on an **x86 host** with
-`python3 build.py` (PyTorch + rknn-toolkit2 + Kokoro-82M weights), then copied to
-`TTSV2/kokoro-server/build/models/` (`onnx/`, `voices_npy/`, `config.json`). The
-setup script tells you exactly what's missing.
+| Path | What runs there | UV project |
+|------|-----------------|------------|
+| [`config.yaml`](config.yaml) | Shared topology + settings (**edit this**) | — |
+| [`config.py`](config.py) | Tiny loader imported by every service | — |
+| [`coordinator/coordinator.py`](coordinator/coordinator.py) | **The voice loop** (mic → … → speaker) | `coordinator/` |
+| [`LLM/llm_server.py`](LLM/llm_server.py) | LLM orchestrator + tools (main board) | `LLM/` |
+| `LLM/rkllama/` | NPU LLM backend (submodule) | `LLM/rkllama/` |
+| [`STT/stt_server.py`](STT/stt_server.py) | STT node (faster-whisper, CPU) | `STT/` |
+| `wakeword/` | Standalone wakeword service (openWakeWord, CPU) | `wakeword/` |
+| `TTS/voice_server.py` | TTS node — paroli (NPU VITS) | `TTS/` |
+| `TTSV2/` · `TTSV3/` | Alt TTS — kokoro (NPU) · piper (CPU) | `TTSV2/` · `TTSV3/` |
+| [`connector.py`](connector.py) | Text test client (laptop) | `./pyproject.toml` |
+| [`start_main_board.sh`](start_main_board.sh) | Daemon manager for the main board | — |
+| [`deploy/`](deploy/) | Host config: systemd unit, ALSA/Spotify | — |
+| `.env.local` | Secrets (API keys) — **gitignored**, never committed | — |
 
-```bash
-# b) once models are in place
-TTSV2/kokoro-server/build/run-kokoro-server.sh   # serves ws://127.0.0.1:8848
-cd TTSV2 && uv sync && uv run python voice_server.py
-uv run python test_tts.py --host 127.0.0.1
-```
+Every service reads the **single `config.yaml`** at the repo root — no hardcoded
+IPs in code. Change a host/port once and everything picks it up.
 
-Voice/speed/rate are set under `ttsv2:` in [`config.yaml`](config.yaml).
+## Quick start (main board)
 
-### 2c. TTSV3 — Piper (CPU, simplest, optional)
-
-[`TTSV3/`](TTSV3/) is the simplest TTS: vanilla [Piper](https://github.com/OHF-Voice/piper1-gpl)
-running **in-process on the CPU** (no submodule, no C++ build, no NPU). It listens
-on the same `services.tts` port (8766) and speaks the same protocol, so it's a
-drop-in for paroli/kokoro — handy as a fallback or on a board without a free NPU.
-
-```bash
-# a) sync the venv and download a voice (default: en_US-lessac-medium)
-bash TTSV3/setup_piper.sh
-
-# b) run it (synthesizes in-process — no separate backend)
-cd TTSV3 && uv run python voice_server.py
-
-# c) verify (writes test_output.wav)
-uv run python test_tts.py --host 127.0.0.1
-```
-
-Voice/length-scale/speaker are set under `ttsv3:` in [`config.yaml`](config.yaml);
-browse voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
-
-## 3. Voice input — STT + wakeword (CPU)
-
-These two run on the **CPU** (no NPU), so they can live on any board — including
-the LLM board alongside rkllama. They're standalone services today; wiring them
-into the full mic→LLM loop is the next step.
-
-### 3a. STT — faster-whisper
-
-[`STT/`](STT/) transcribes speech to text with
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8 on
-CPU — much lighter than `openai-whisper`; the `STT/whisper` submodule stays as
-upstream reference). A client streams an utterance as PCM and gets back text.
-
-```bash
-bash STT/setup_stt.sh                       # uv sync + pre-download the model
-cd STT && uv run python stt_server.py        # serves ws://0.0.0.0:8767
-# verify with any 16-bit mono WAV:
-uv run python test_stt.py --host 127.0.0.1 --wav /path/to/speech.wav
-```
-
-Model/language/compute-type live under `stt:` in [`config.yaml`](config.yaml)
-(default `base.en`, int8). Audio at any rate is resampled to 16 kHz.
-
-### 3b. Wakeword — openWakeWord
-
-[`wakeword/`](wakeword/) listens for a wake phrase with
-[openWakeWord](https://github.com/dscripka/openWakeWord) (ONNX on CPU). The
-default phrase is the pretrained **"hey jarvis"** model, downloaded on setup.
-
-```bash
-bash wakeword/setup_wakeword.sh             # uv sync + download the model
-# test over a WAV (no mic needed):
-cd wakeword && uv run python wakeword_listener.py --wav /path/to/clip.wav
-# live mic (needs PortAudio):
-sudo apt install -y libportaudio2
-uv sync --extra mic && uv run python wakeword_listener.py
-```
-
-Phrase/threshold live under `wakeword:` in [`config.yaml`](config.yaml); other
-phrases (`alexa`, `hey_mycroft`, …) are downloaded on demand.
-
-## 4. Connector (test client, e.g. your laptop)
-
-```bash
-uv sync                 # add `--extra audio` for PyAudio; otherwise falls back to aplay
-uv run python connector.py
-# type a prompt; commands: /clear, /help, exit
-```
-
-## 5. Coordinator — the full voice loop
-
-[`coordinator/`](coordinator/) is the one client that combines every stage. Run
-it on the device with the **mic + speakers**; it chains them and reaches the
-remote stages over WebSocket (STT `:8767`, LLM `:8765`, which itself drives TTS):
-
-```
-  mic ─▶ wakeword (local CPU) ─▶ record ─▶ STT ─▶ LLM ─▶ play reply ─▶ (loop)
-```
-
-```bash
-cd coordinator && uv sync
-sudo apt install -y libportaudio2          # mic + speaker capture/playback
-
-# full voice loop: say the wake word ("hey jarvis"), then your request
-uv run python coordinator.py
-
-# testable without a mic:
-uv run python coordinator.py --text "What is the capital of France?"
-uv run python coordinator.py --wav clip.wav        # STT a WAV, then ask the LLM
-uv run python coordinator.py --wav clip.wav --no-audio   # headless (print only)
-```
-
-Prereqs: the **STT** node (`STT/stt_server.py`) and the **LLM** node
-(`LLM/llm_server.py`, with its TTS node up) must be running. Wakeword phrase and
-recording behaviour (silence timeout, etc.) live under `wakeword:` /
-`coordinator:` in [`config.yaml`](config.yaml).
-
-**End-pointing:** recording stops as soon as you finish speaking, via
-`webrtcvad` voice-activity detection (tune `coordinator.vad_aggressiveness` 0–3
-and `silence_timeout`); `max_record_seconds` is just a safety cap.
-
-**Conversation memory:** the coordinator keeps one LLM connection across
-wake-words, so history carries over between turns (ask a follow-up without
-repeating context). Once `coordinator.memory_timeout` seconds (default 60) pass
-between two wake-words, it starts a fresh conversation.
-
-### Smart-home control (tool calls)
-
-The LLM can switch Tasmota smart plugs via a `set_light` tool. Say e.g. *"turn
-off the bed light"* and the model calls the tool; `llm_server.py` issues the
-HTTP command to the plug and then speaks a confirmation ("Okay, I've turned the
-bed light off"). Define the plugs under `lights:` in [`config.yaml`](config.yaml):
-
-```yaml
-lights:
-  bed: 192.168.188.29   # Tasmota plug IP
-  tv:  192.168.188.22
-```
-
-Each entry becomes an allowed value of the tool's `light` argument (plus `all`,
-which switches every configured light — *"turn off all the lights"*); the plug
-is switched with `http://<ip>/cm?cmnd=Power%20On|Off`. Add more plugs by adding
-lines here (no code change). Requires the LLM board to reach the plugs' network.
-
-There's also a `get_weather` tool (WeatherAPI). Ask *"what's the weather?"* and
-the model calls it; `llm_server.py` fetches the current conditions, feeds the
-`current` block back to the model, and the model answers in natural speech.
-Location is set under `weather:` in [`config.yaml`](config.yaml); the **API key
-is not stored in the repo** — put it in `.env.local` (gitignored), which
-`start_main_board.sh` loads into the environment:
-
-```bash
-echo 'WEATHERAPI_KEY=your_key_here' > .env.local
-```
-
-(Unlike `set_light`, which speaks a fixed confirmation, data tools like
-`get_weather` do a tool-result round-trip so the model phrases the reply.)
-
-A `set_timer` tool (parameter: minutes) is also available — *"set a timer for 5
-minutes"*. The LLM node confirms ("timer set for 5 minutes") and sends a
-`{"type":"timer","seconds":N}` control event to the **coordinator**, which
-schedules it locally (only the coordinator has the speaker). When it fires the
-coordinator beeps and announces "your timer is finished".
-
-A `get_time` tool answers *"what time is it?"* with the board's local time
-(spoken directly, no round-trip).
-
-### Spotify (`play_music`)
-
-The board runs **Raspotify** (librespot) as a Spotify **Connect** receiver named
-`Aven` (set in `/etc/raspotify/conf`), so it shows up as a speaker in the Spotify
-app on your phone (Premium required). Its audio and the assistant's TTS share the
-Pebble via an ALSA `dmix` (`/etc/asound.conf`), so they don't fight over the DAC.
-
-The `play_music` tool then lets you say *"play some Daft Punk"* — `llm_server`
-searches the Spotify Web API (via `spotipy`), finds the `Aven` device, and starts
-playback. `stop_music` (*"stop the music"*) pauses it. Both are **off until you
-add credentials**:
-
-1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard),
-   Redirect URI `http://127.0.0.1:8888/callback`.
-2. Put the keys in `.env.local` (gitignored): `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`.
-3. One-time sign-in (needs Premium):
-   ```bash
-   cd LLM && set -a && . ../.env.local && set +a && uv run python spotify_auth.py
-   ```
-   Open the printed URL, authorize, paste the redirect URL back. This caches a
-   token (`LLM/.spotify_cache`, gitignored) the server reuses.
-4. `./start_main_board.sh restart llm_server`.
-
-`spotify.device` in [`config.yaml`](config.yaml) must match `LIBRESPOT_NAME`.
-Note: the Web API only sees the device once it's been activated — if "the Aven
-speaker isn't available", select it once in your phone's Spotify Connect menu.
-
-## Running the main board as daemons
-
-[`start_main_board.sh`](start_main_board.sh) starts everything this board hosts as
-background daemons that survive an SSH disconnect (logs in `logs/`, unbuffered):
-
-| Service | Port | Notes |
-|---|---|---|
-| `rkllama` | 8080 | NPU LLM backend |
-| `llm_server` | 8765 | orchestrator → TTS board |
-| `stt` | 8767 | faster-whisper (CPU) |
-| `coordinator` | — | voice loop: **wakeword + mic + playback** (needs USB mic/speakers) |
-
-It starts them in order (waiting for rkllama's `/models` before the orchestrator),
-is idempotent, and tracks the coordinator by process (it has no port).
+If the boards are already set up (see [per-node setup](#per-node-setup) for a
+fresh install), the whole main-board stack is one command:
 
 ```bash
 ./start_main_board.sh            # start everything (skips what's already up)
@@ -330,46 +141,242 @@ is idempotent, and tracks the coordinator by process (it has no port).
 ./start_main_board.sh stop
 ```
 
-The TTS node runs on the other board, so it isn't started here.
+It starts `rkllama → llm_server → stt → coordinator` in order (waiting for
+rkllama to load before the orchestrator), is idempotent, logs to `logs/`, and
+loads secrets from `.env.local`. The TTS node runs on the other board, so it
+isn't started here.
 
-### USB mic + speakers
+### Auto-start on boot (systemd)
 
-The coordinator needs PortAudio and an audio device:
+[`deploy/aven.service`](deploy/aven.service) runs the stack at boot as your user:
 
 ```bash
-sudo apt install -y libportaudio2          # one-time
-# plug in the USB mic + speakers, then list devices:
+sudo cp deploy/aven.service /etc/systemd/system/aven.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now aven.service     # start now + on every boot
+```
+
+```bash
+sudo systemctl start|stop|restart aven       # whole stack
+systemctl status aven                         # cgroup shows all 4 services
+journalctl -u aven                            # start/stop wrapper output
+```
+
+It's a `Type=oneshot` wrapper around `start_main_board.sh`, so per-service
+control still goes through the script. An `ExecStartPre` waits up to 30 s for the
+USB mic so the coordinator isn't skipped when USB enumerates a moment after boot.
+
+## Per-node setup
+
+Fresh boards only. Requires [UV](https://docs.astral.sh/uv/) and submodules:
+`git submodule update --init --recursive`.
+
+### 1. LLM node (main board — 100.108.158.94)
+
+rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312) and
+can't be launched with `uv run` directly (its pyproject declares the NPU wheel
+with a relative `file:./…` URL uv refuses to parse). `setup_rkllama.sh` installs
+it into a local venv (rewriting that URL to absolute for the install); the
+orchestrator is a separate, lightweight UV project that talks to it over HTTP.
+
+```bash
+# a) one-time: install rkllama into LLM/rkllama/venv (downloads torch etc. — large)
+bash LLM/setup_rkllama.sh
+
+# b) rkllama NPU backend (serves http://0.0.0.0:8080)
+cd LLM/rkllama && ./venv/bin/rkllama_server
+
+# c) one-time: pull the model (second shell, server must be running)
+cd LLM/rkllama && ./venv/bin/rkllama_client pull \
+  c01zaut/Qwen2.5-3B-Instruct-rk3588-1.1.1/Qwen2.5-3B-Instruct-rk3588-w8a8-opt-0-hybrid-ratio-0.5.rkllm/qwen2.5-3b
+# → the local model becomes "qwen2.5-3b" (matches llm.model in config.yaml)
+
+# d) the orchestrator
+cd LLM && uv sync && uv run python llm_server.py     # serves ws://0.0.0.0:8765
+```
+
+### 2. TTS node (second board — 100.113.61.126)
+
+`paroli-server` is a C++ NPU engine. `setup_paroli.sh` builds it and fetches a
+voice in one shot (prompts for sudo once; auto-adapts to the board OS — installs
+packaged `libdrogon-dev` on trixie, builds Drogon from source on bookworm):
+
+```bash
+bash TTS/setup_paroli.sh                       # one-time build + voice (ljspeech)
+TTS/paroli/build/run-paroli-server.sh          # NPU engine, ws://127.0.0.1:8848
+cd TTS && uv sync && uv run python voice_server.py   # node, ws://0.0.0.0:8766
+uv run python test_tts.py --host 127.0.0.1     # verify → test_output.wav
+```
+
+Two drop-in alternatives speak the same protocol on the same port (run **one**):
+
+- **TTSV2 — [kokoro-server](https://github.com/marty1885/kokoro-server)** (Kokoro-82M, NPU; nicer voice).
+  `bash TTSV2/setup_kokoro.sh`. ⚠️ Its ONNX/RKNN models aren't downloadable — they
+  must be generated on an x86 host (`python3 build.py`) and copied to
+  `TTSV2/kokoro-server/build/models/`. Settings under `ttsv2:` in config.
+- **TTSV3 — [Piper](https://github.com/OHF-Voice/piper1-gpl)** (CPU, in-process,
+  simplest; no NPU, no C++ build). `bash TTSV3/setup_piper.sh` then
+  `cd TTSV3 && uv run python voice_server.py`. Settings under `ttsv3:`; browse
+  voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+
+### 3. STT + wakeword (CPU, on the main board)
+
+Both run on the **CPU**, alongside rkllama on the main board.
+
+```bash
+# STT — faster-whisper (CTranslate2, int8). Settings under stt: (default base.en)
+bash STT/setup_stt.sh
+cd STT && uv run python stt_server.py          # serves ws://0.0.0.0:8767
+
+# Wakeword — openWakeWord (ONNX). Default phrase "hey jarvis". Settings under wakeword:
+bash wakeword/setup_wakeword.sh
+```
+
+The coordinator does wakeword detection in-process, so the standalone
+`wakeword/` service is mainly for testing (`--wav clip.wav`). Other phrases
+(`alexa`, `hey_mycroft`, …) download on demand.
+
+### 4. USB mic + speakers
+
+```bash
+sudo apt install -y libportaudio2              # one-time, on the main board
 cd coordinator && uv run python coordinator.py --list-devices
 ```
 
-Set `coordinator.input_device` / `output_device` in [`config.yaml`](config.yaml) to
-the USB device's index or a unique part of its name (default `null` = system
-default), then `./start_main_board.sh restart coordinator`. If no capture device
-is present, the script skips the coordinator and starts the rest.
+Set `coordinator.input_device` / `output_device` in [`config.yaml`](config.yaml)
+to the device index or a unique part of its name (`null` = system default). The
+default audio setup uses an ALSA `dmix` on the Pebble V3 (`deploy/asound.conf` →
+`/etc/asound.conf`) so the assistant and Spotify can share the speaker.
+
+**Hot-pluggable:** both devices can be unplugged and replugged without
+restarting. If the **speaker** is gone the reply is generated but its audio is
+dropped (no crash); replug and the next turn uses it. If the **mic** is yanked
+the coordinator waits and reconnects instead of crashing (it re-scans PortAudio,
+since a replugged USB mic is otherwise invisible). The probed speaker card is
+`coordinator.speaker_card` (default `V3`).
+
+## Using it
+
+Say **"hey jarvis"**, wait for the beep, then speak. Without a mic you can drive
+it by text or WAV:
+
+```bash
+cd coordinator && uv sync
+uv run python coordinator.py                          # full voice loop
+uv run python coordinator.py --text "What's the capital of France?"
+uv run python coordinator.py --wav clip.wav           # STT a WAV, then ask
+uv run python coordinator.py --wav clip.wav --no-audio   # headless (print only)
+```
+
+Or use the text [`connector.py`](connector.py) from a laptop
+(`uv run python connector.py`; commands `/clear`, `/help`, `exit`).
+
+**End-pointing:** recording stops as soon as you finish talking, via `webrtcvad`
+(tune `coordinator.vad_aggressiveness` 0–3 and `silence_timeout`);
+`max_record_seconds` is just a safety cap.
+
+**Conversation memory:** the coordinator keeps one LLM connection across
+wake-words, so follow-ups carry context. After `coordinator.memory_timeout`
+seconds (default 60) between two wake-words, it starts a fresh conversation.
+
+### Tools (what it can act on)
+
+The model is given a small set of tools; `llm_server` executes them and speaks a
+result. For brittle, must-work commands there are also **deterministic
+shortcuts** that run the action *before* the model ever sees the text — so they
+never depend on a 3B model deciding to call a tool.
+
+| Say | Tool | What happens |
+|-----|------|--------------|
+| *"turn off the bed light"*, *"lights on"*, *"all lights off"* | `set_light` | Switches Tasmota plugs over HTTP. **Shortcut** for plain on/off phrasing. |
+| *"what's the weather?"* | `get_weather` | WeatherAPI → result fed back so the model phrases the reply. |
+| *"set a timer for 5 minutes"* | `set_timer` | Confirms, then the **coordinator** schedules it locally; beeps + "your timer is finished" when it fires. |
+| *"what time is it?"* | `get_time` | Board's local time, spoken directly. |
+| *"play some Daft Punk"* | `play_music` | Spotify search + playback on the `Aven` device. |
+| *"stop"*, *"pause"*, *"shut up"* | `stop_music` | Pauses Spotify. **Shortcut.** |
+| *"continue"*, *"resume"*, *"keep playing"* | `resume_music` | Resumes the last Spotify playback. **Shortcut.** |
+
+Lights are defined under `lights:` in [`config.yaml`](config.yaml) — each entry
+becomes an allowed value of the tool (plus `all`); add plugs with no code change:
+
+```yaml
+lights:
+  bed: 192.168.188.29   # Tasmota plug IP
+  tv:  192.168.188.22
+```
+
+Secrets are **never stored in the repo** — put them in `.env.local` (gitignored),
+which `start_main_board.sh` loads:
+
+```bash
+echo 'WEATHERAPI_KEY=your_key_here' >> .env.local
+```
+
+### Spotify
+
+The board runs **Raspotify** (librespot) as a Spotify **Connect** receiver named
+`Aven` (`/etc/raspotify/conf`), sharing the Pebble with the assistant's TTS via
+ALSA `dmix`. `play_music`/`stop_music`/`resume_music` are **off until you add
+credentials**:
+
+1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard),
+   Redirect URI `http://127.0.0.1:8888/callback` (Spotify rejects `localhost`).
+2. Put the keys in `.env.local`: `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`.
+3. One-time sign-in (needs Premium):
+   ```bash
+   cd LLM && set -a && . ../.env.local && set +a && uv run python spotify_auth.py
+   ```
+   Open the printed URL, authorize, paste the redirect URL back. Caches a token
+   (`LLM/.spotify_cache`, gitignored).
+4. `./start_main_board.sh restart llm_server`.
+
+`spotify.device` in config must match `LIBRESPOT_NAME`. Set
+`LIBRESPOT_CACHE="/var/cache/raspotify"` so librespot persists its login and
+auto-reconnects after a reboot — otherwise it only appears in Spotify's API after
+you activate `Aven` once from the phone app, and that's lost on every reboot. See
+[`deploy/README.md`](deploy/README.md) for the full host config.
 
 ## Configuration
 
-All knobs live in [`config.yaml`](config.yaml): the host/port of each service,
-the rkllama model name, the system prompt, and TTS sample rate / speaker.
-Every server still accepts CLI flags (`--host`, `--port`, `--tts-host`, …) that
-override the config for one-off runs — e.g. to colocate TTS on the LLM board for
-a quick test:
+All knobs live in [`config.yaml`](config.yaml): each service's host/port, the
+rkllama model, the system prompt, TTS voice/rate, lights, weather location,
+Spotify device, and coordinator behaviour (devices, VAD, memory timeout).
+Servers also accept CLI flags that override config for one-off runs — e.g.
+colocate TTS on the LLM board for a quick test:
 
 ```bash
 cd LLM && uv run python llm_server.py --tts-host 127.0.0.1
 ```
 
+## Troubleshooting
+
+The pipeline fails *silently* in a few reboot-related ways worth knowing:
+
+- **It hears you but says nothing** (logs show `0 PCM chunks`, `first_token 0 ms`).
+  rkllama's prompt cache was left corrupt by an unclean shutdown, so the model
+  emits one token then stops. `start_main_board.sh` now clears that cache on each
+  rkllama start; to fix a running instance, `./start_main_board.sh restart rkllama`.
+- **"The Aven speaker isn't available on Spotify."** librespot isn't registered
+  with your account — set `LIBRESPOT_CACHE` and activate `Aven` once from the
+  phone (see [Spotify](#spotify)).
+- **Mic captures silence / `Input/output error -9999`.** A PS3 Eye that lost bus
+  power can wedge (enumerates but delivers 0 bytes); a physical unplug/replug
+  resets it. A *clean* unplug now auto-reconnects.
+- **Prefer a clean `sudo reboot`** over pulling power — most of the above stem
+  from unclean shutdowns mid-write.
+
 ## Submodules
 
-| Submodule              | Used by      | Status            |
-|------------------------|--------------|-------------------|
-| `LLM/rkllama`          | LLM node     | active            |
-| `TTS/paroli`           | TTS node     | active            |
-| `TTSV2/kokoro-server`  | TTS node (v2)| active (optional) |
-| `STT/whisper`          | STT          | reference (STT uses the `faster-whisper` pip pkg) |
-| `wakeword/openWakeWord`| Wakeword     | reference (wakeword uses the `openwakeword` pip pkg) |
+| Submodule | Used by | Status |
+|-----------|---------|--------|
+| `LLM/rkllama` | LLM node | active |
+| `TTS/paroli` | TTS node | active |
+| `TTSV2/kokoro-server` | TTS node (v2) | active (optional) |
+| `STT/whisper` | STT | reference (STT uses the `faster-whisper` pip pkg) |
+| `wakeword/openWakeWord` | Wakeword | reference (uses the `openwakeword` pip pkg) |
 
 ## Hardware
 
-- 1–2 Rock 5C (lite)
-- Microphone + speakers (for the full voice loop later)
+- 2× Rock 5C (RK3588) — one brain board, one TTS board
+- USB microphone (PS3 Eye) + USB speakers (Creative Pebble V3)
+- Optional: Tasmota smart plugs, Spotify Premium

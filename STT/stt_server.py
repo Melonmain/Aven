@@ -46,7 +46,7 @@ def pcm_to_float16k(pcm_bytes, in_rate):
     return audio
 
 
-def make_handler(model, language, beam_size):
+def make_handler(model, language, beam_size, vad_filter, initial_prompt):
     from websockets.exceptions import ConnectionClosed
 
     def handler(conn):
@@ -76,7 +76,11 @@ def make_handler(model, language, beam_size):
                     audio = pcm_to_float16k(bytes(buf), in_rate)
                     seconds = len(audio) / TARGET_RATE
                     segments, info = model.transcribe(
-                        audio, language=language, beam_size=beam_size)
+                        audio, language=language, beam_size=beam_size,
+                        vad_filter=vad_filter,            # Silero VAD trims non-speech
+                        temperature=0,                     # deterministic, no guessing
+                        condition_on_previous_text=False,  # avoid hallucination loops
+                        initial_prompt=initial_prompt or None)  # bias toward our vocab
                     text = "".join(seg.text for seg in segments).strip()
                     print(f"[>] {peer}: ({seconds:.1f}s) -> {text!r}", flush=True)
                     conn.send(json.dumps({
@@ -100,6 +104,9 @@ def main():
     parser.add_argument("--language", default=_STT["language"])
     parser.add_argument("--compute-type", default=_STT["compute_type"])
     parser.add_argument("--beam-size", type=int, default=_STT["beam_size"])
+    parser.add_argument("--vad-filter", action="store_true",
+                        default=_STT.get("vad_filter", True))
+    parser.add_argument("--initial-prompt", default=_STT.get("initial_prompt"))
     args = parser.parse_args()
 
     try:
@@ -111,11 +118,13 @@ def main():
 
     print(f"Loading faster-whisper '{args.model}' (cpu/{args.compute_type})…", flush=True)
     model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type)
-    handler = make_handler(model, args.language, args.beam_size)
+    handler = make_handler(model, args.language, args.beam_size,
+                           args.vad_filter, args.initial_prompt)
 
     print("\033[32mSTT node ready.\033[0m")
     print(f"  Model     : {args.model}  (cpu/{args.compute_type}, beam {args.beam_size})")
     print(f"  Language  : {args.language or 'auto'}")
+    print(f"  VAD filter: {args.vad_filter}")
     print(f"  Listening : ws://{args.host}:{args.port}  (reach me at ws://{ROCK5C_IP}:{args.port})")
     with serve(handler, args.host, args.port) as server:
         server.serve_forever()

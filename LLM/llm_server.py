@@ -545,6 +545,10 @@ def _claude_tool_doc(tools):
 
 def build_claude_system(base, tools):
     """System prompt for the Claude backend: base prompt + JSON tool protocol."""
+    # The CLI injects the operator's account identity (email) into context; a
+    # voice assistant shouldn't volunteer it.
+    base = base + (" Never mention or use the operator's email address or other"
+                   " host-account details, even if asked.")
     doc = _claude_tool_doc(tools)
     if not doc:
         return base
@@ -594,6 +598,7 @@ def stream_claude(messages, tools=None):
     cmd = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose",
            "--include-partial-messages", "--max-turns", "1",
            "--system-prompt", build_claude_system(system, tools),
+           "--exclude-dynamic-system-prompt-sections",  # keep only our system prompt (drop CLI cwd/tools/date)
            "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
     if CLAUDE_MODEL:
         cmd += ["--model", CLAUDE_MODEL]
@@ -667,6 +672,108 @@ def stream_claude(messages, tools=None):
             yield ("text", buf)
 
 
+class ClaudeSession:
+    """A persistent `claude -p` process driven over stream-json, so the CLI
+    starts once per conversation instead of once per turn — lower latency, a
+    warm prompt cache, and the process keeps the multi-turn memory itself (so we
+    send only the new message each turn, not the whole history)."""
+
+    def __init__(self, system_prompt):
+        self._system = build_claude_system(system_prompt, TOOLS)
+        self._proc = None
+
+    def _ensure(self):
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        cmd = [CLAUDE_BIN, "-p",
+               "--input-format", "stream-json", "--output-format", "stream-json",
+               "--include-partial-messages", "--verbose",
+               "--system-prompt", self._system,
+               "--exclude-dynamic-system-prompt-sections",  # keep only our system prompt (drop CLI cwd/tools/date)
+               "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+        if CLAUDE_MODEL:
+            cmd += ["--model", CLAUDE_MODEL]
+        self._proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+    def send(self, text, detect_tool=True):
+        """Send one user message; yield ('text', tok) / ('tool', [calls])."""
+        try:
+            self._ensure()
+            msg = {"type": "user", "message": {"role": "user",
+                   "content": [{"type": "text", "text": text}]}}
+            self._proc.stdin.write(json.dumps(msg) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            print(f"[claude] session send failed: {exc}", flush=True)
+            self.close()
+            yield ("text", "Sorry, I couldn't reach Claude.")
+            return
+
+        buf, whole, mode = "", "", None
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "result":          # end of this turn
+                break
+            if etype == "assistant":       # full message — fallback if no deltas
+                whole = "".join(b.get("text", "") for b in ev.get("message", {}).get("content", [])
+                                if b.get("type") == "text")
+                continue
+            if etype != "stream_event":
+                continue
+            inner = ev.get("event") or {}
+            if inner.get("type") != "content_block_delta":
+                continue
+            delta = inner.get("delta") or {}
+            if delta.get("type") != "text_delta":   # ignore thinking deltas
+                continue
+            piece = delta.get("text") or ""
+            if not piece:
+                continue
+            buf += piece
+            if mode is None:
+                stripped = buf.lstrip()
+                if not stripped:
+                    continue
+                mode = "tool" if (detect_tool and stripped[0] == "{") else "text"
+            if mode == "text":
+                yield ("text", piece)
+        if mode is None and whole.strip():
+            buf = whole
+            mode = "tool" if (detect_tool and whole.lstrip()[0] == "{") else "text"
+            if mode == "text":
+                yield ("text", whole)
+        if mode == "tool":
+            calls = _parse_claude_tool(buf)
+            yield ("tool", calls) if calls else ("text", buf)
+
+    def reset(self):
+        """Drop the conversation (used on 'clear') by restarting the process."""
+        self.close()
+
+    def close(self):
+        if self._proc is None:
+            return
+        try:
+            if self._proc.stdin:
+                self._proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+        self._proc = None
+
+
 def synth_clause(tts_ws, text):
     """Send one clause to the TTS node; yield ('rate', n) / ('pcm', b) / ('error', m)."""
     tts_ws.send(json.dumps({"text": text}))
@@ -685,8 +792,13 @@ def synth_clause(tts_ws, text):
                 return
 
 
-def run_turn(conn, tts_url, prompt, history, model):
-    """Stream LLM -> clauses -> TTS node -> relay PCM to the laptop."""
+def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
+    """Stream LLM -> clauses -> TTS node -> relay PCM to the laptop.
+
+    With the claude backend a persistent ClaudeSession owns the conversation, so
+    we send only the new message (no history re-send). The rkllama backend uses
+    the history list as before.
+    """
     from websockets.sync.client import connect as ws_connect
     from websockets.exceptions import ConnectionClosed
 
@@ -697,8 +809,34 @@ def run_turn(conn, tts_url, prompt, history, model):
         conn.send(json.dumps({"type": "done"}))
         return
 
-    history.append({"role": "user", "content": prompt})
+    use_claude = claude_session is not None
+    if not use_claude:
+        history.append({"role": "user", "content": prompt})
     events: queue.Queue = queue.Queue()
+
+    def first_stream():
+        if use_claude:
+            return claude_session.send(prompt, detect_tool=True)
+        return stream_llm(history, model, TOOLS)
+
+    def weather_followup(calls):
+        """Feed the data-tool result back so the model answers in words."""
+        if use_claude:
+            results = "; ".join(run_tool(c) for c in calls if c.get("name") == "get_weather")
+            return claude_session.send(
+                f"The get_weather tool returned: {results}\nAnswer my question now"
+                " in one or two short spoken sentences.", detect_tool=False)
+        history.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": c.get("id") or f"call_{i}", "type": "function",
+                "function": {"name": c["name"], "arguments": json.dumps(c.get("arguments") or {})},
+            } for i, c in enumerate(calls)],
+        })
+        for i, c in enumerate(calls):
+            history.append({"role": "tool", "tool_call_id": c.get("id") or f"call_{i}",
+                            "content": run_tool(c)})
+        return stream_llm(history, model, None)
 
     def produce():
         try:
@@ -716,7 +854,7 @@ def run_turn(conn, tts_url, prompt, history, model):
                     events.put(("clause", tail.strip()))
                 events.put(("eot", shortcut))
                 return
-            for kind, val in stream_llm(history, model, TOOLS):
+            for kind, val in first_stream():
                 if kind == "text":
                     collected.append(val)
                     events.put(("llm", val))
@@ -726,21 +864,7 @@ def run_turn(conn, tts_url, prompt, history, model):
                         events.put(("clause", clause))
                 elif kind == "tool":
                     if any(c.get("name") == "get_weather" for c in val):
-                        # Data tool: feed the result back so the model answers in
-                        # words (a second, tool-less completion -> streamed reply).
-                        history.append({
-                            "role": "assistant", "content": None,
-                            "tool_calls": [{
-                                "id": c.get("id") or f"call_{i}", "type": "function",
-                                "function": {"name": c["name"],
-                                             "arguments": json.dumps(c.get("arguments") or {})},
-                            } for i, c in enumerate(val)],
-                        })
-                        for i, c in enumerate(val):
-                            history.append({"role": "tool",
-                                            "tool_call_id": c.get("id") or f"call_{i}",
-                                            "content": run_tool(c)})
-                        for kind2, val2 in stream_llm(history, model, None):
+                        for kind2, val2 in weather_followup(val):
                             if kind2 == "text":
                                 collected.append(val2)
                                 events.put(("llm", val2))
@@ -806,15 +930,17 @@ def run_turn(conn, tts_url, prompt, history, model):
                 break
             elif kind == "error":
                 conn.send(json.dumps({"type": "error", "message": payload}))
-                history.pop()
+                if not use_claude:
+                    history.pop()
                 conn.send(json.dumps({"type": "done"}))
                 return
 
     conn.send(json.dumps({"type": "done"}))
-    if reply.strip():
-        history.append({"role": "assistant", "content": reply})
-    else:
-        history.pop()
+    if not use_claude:                       # claude's process owns its own memory
+        if reply.strip():
+            history.append({"role": "assistant", "content": reply})
+        else:
+            history.pop()
 
 
 def make_handler(tts_url, default_model, system_prompt):
@@ -824,6 +950,9 @@ def make_handler(tts_url, default_model, system_prompt):
         peer = conn.remote_address[0] if conn.remote_address else "?"
         print(f"[+] laptop connected: {peer}", flush=True)
         history = [{"role": "system", "content": system_prompt}]
+        # One persistent claude process per connection (started lazily on the
+        # first turn); None for the rkllama backend.
+        claude_session = ClaudeSession(system_prompt) if BACKEND == "claude" else None
         try:
             for message in conn:
                 if isinstance(message, bytes):
@@ -834,6 +963,8 @@ def make_handler(tts_url, default_model, system_prompt):
                     data = {"text": message}
                 if data.get("command") == "clear":
                     history = [{"role": "system", "content": system_prompt}]
+                    if claude_session is not None:
+                        claude_session.reset()
                     conn.send(json.dumps({"type": "cleared"}))
                     print(f"[i] {peer}: history cleared", flush=True)
                     continue
@@ -848,10 +979,12 @@ def make_handler(tts_url, default_model, system_prompt):
                 if not prompt:
                     continue
                 print(f"[>] {peer}: {prompt}", flush=True)
-                run_turn(conn, tts_url, prompt, history, model)
+                run_turn(conn, tts_url, prompt, history, model, claude_session)
         except ConnectionClosed:
             pass
         finally:
+            if claude_session is not None:
+                claude_session.close()
             print(f"[-] laptop disconnected: {peer}", flush=True)
 
     return handler

@@ -177,11 +177,14 @@ Fresh boards only. Requires [UV](https://docs.astral.sh/uv/) and submodules:
 
 **Two brains, toggle in config.** `llm.backend` selects who answers:
 
-- **`claude`** (default) — the installed [Claude CLI](https://claude.com/claude-code)
-  (`claude -p`), using your own Claude auth (no API key). Better quality and
-  faster first token; needs internet. `llm_server` shells out to it, streams the
-  reply, and parses tool use from a JSON directive. Optionally pin a model with
-  `llm.claude_model` (e.g. `claude-haiku-4-5` for snappier voice replies).
+- **`claude`** (default) — the installed [Claude CLI](https://claude.com/claude-code),
+  using your own Claude auth (no API key); needs internet. `llm_server` keeps **one
+  persistent `claude` process per conversation** (driven over `--input-format
+  stream-json`), so the CLI starts once instead of per turn — warm turns are
+  ~1.5–2 s, the prompt cache stays hot, and the process holds the multi-turn
+  memory itself. Tool use is parsed from a JSON directive the model prints.
+  Optionally pin a model with `llm.claude_model` (default `claude-haiku-4-5`,
+  fast and cheap — a good fit for voice).
 - **`rkllama`** — the fully-offline local NPU model (Qwen2.5-3B), set up below.
 
 Flip `llm.backend` in [`config.yaml`](config.yaml) and restart `llm_server` — no

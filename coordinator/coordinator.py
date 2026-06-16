@@ -123,14 +123,18 @@ class Player:
         self._src_rate = rate
         if self._stream is not None:
             return
+        # Open at the device's native rate and resample to it in write(), rather
+        # than asking for our source rate. The ALSA 'default' (dmix on the USB
+        # speaker) is locked to 48 kHz, so requesting 24 kHz fails with
+        # 'Invalid sample rate' (-9997). Query the default device too, not just
+        # an explicit one — kind="output" resolves None to the default.
         self._channels, self._dev_rate = 1, rate
-        if self.device is not None:
-            try:
-                info = self._sd.query_devices(self.device)
-                self._channels = min(max(int(info["max_output_channels"]), 1), 2)
-                self._dev_rate = int(info["default_samplerate"])
-            except Exception:
-                self._channels, self._dev_rate = 1, rate
+        try:
+            info = self._sd.query_devices(self.device, kind="output")
+            self._channels = min(max(int(info["max_output_channels"]), 1), 2)
+            self._dev_rate = int(info["default_samplerate"])
+        except Exception:
+            self._channels, self._dev_rate = 1, rate
         try:
             self._stream = self._sd.RawOutputStream(
                 samplerate=self._dev_rate, channels=self._channels, dtype="int16",

@@ -5,21 +5,31 @@ These live on the host, outside the repo's runtime. To reproduce on a board:
     # 1. Share the Pebble between apps via ALSA dmix (cross-user via ipc_perm 0666)
     sudo cp deploy/asound.conf /etc/asound.conf
 
-    # 2. Let Raspotify/librespot share the host dmix IPC (drop PrivateUsers sandbox)
+    # 2. librespot: share the dmix IPC (drop PrivateUsers) AND launch with
+    #    explicit flags so it logs in with cached credentials on boot.
     sudo mkdir -p /etc/systemd/system/raspotify.service.d
     sudo cp deploy/raspotify-override.conf /etc/systemd/system/raspotify.service.d/override.conf
     sudo systemctl daemon-reload && sudo systemctl restart raspotify
 
-`/etc/raspotify/conf` also needs `LIBRESPOT_NAME="Aven"`, `LIBRESPOT_BACKEND="alsa"`,
-`LIBRESPOT_DEVICE="default"`, and `LIBRESPOT_CACHE="/var/cache/raspotify"`. The
-coordinator uses ALSA `default` (config `coordinator.output_device: null`).
+The override's `ExecStart` runs librespot with `--name Aven --disable-discovery
+--system-cache /var/cache/raspotify` (so it bypasses `/etc/raspotify/conf` env
+vars). The coordinator uses ALSA `default` (config `coordinator.output_device: null`).
 
-`LIBRESPOT_CACHE` is important: without it librespot runs in discovery mode and
-only appears in Spotify's Web API after a phone connects to it once, and that
-registration is lost on every reboot — so `play_music` reports "the Aven speaker
-isn't available". With the cache set, activate "Aven" once from the Spotify app
-(Connect to a device); librespot then persists the credentials and auto-logs-in
-on every boot, staying visible to the API (and the play/continue tools).
+### Spotify device sign-in (no phone, survives reboots)
+
+`play_music` finds the `Aven` device via Spotify's Web API. A discovery-mode
+librespot only appears there after a phone activates it, and that's lost on every
+reboot ("the Aven speaker isn't available"). Instead, sign in **once** with a
+browser via librespot's OAuth flow, which caches `credentials.json`; with
+`--disable-discovery` librespot then logs in on every boot and stays in the API —
+no phone, ever.
+
+    sudo bash deploy/spotify_device_auth.sh
+
+It prints a URL; open it in any browser, log in, authorize. The redirect goes to
+`http://127.0.0.1:5588`, so if your browser is on another machine, forward the
+port first: `ssh -L 5588:localhost:5588 <user>@<board>`. Once `credentials.json`
+is written it restarts raspotify, and `Aven` is available to play/stop/resume.
 
 ## Auto-start on boot (systemd)
 

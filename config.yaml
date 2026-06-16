@@ -75,7 +75,10 @@ llm:
   keepalive_minutes: 10
   system_prompt: >-
     You are Aven, a voice assistant. Reply briefly in plain spoken sentences for
-    text to speech, with no markdown or special symbols.
+    text to speech, with no markdown or special symbols. The user's words come
+    from imperfect speech-to-text and may be garbled or slightly wrong; infer the
+    most likely intended meaning and answer it directly. Do not ask the user to
+    repeat or clarify unless the text is completely meaningless.
 
 tts:
   # Native PCM sample rate of the paroli/Piper model (Piper voices are 22050).

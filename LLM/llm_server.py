@@ -548,10 +548,11 @@ def build_claude_system(base, tools):
     doc = _claude_tool_doc(tools)
     if not doc:
         return base
-    return (base + "\n\nYou can take actions with these tools. To use one, reply with "
-            'ONLY a single line of JSON and nothing else: {"tool": "<name>", "arguments": {...}}\n'
-            "Tools:\n" + doc +
-            "\nIf no tool is needed, just answer in one or two short spoken sentences.")
+    return (base + "\n\nYou have NO callable tools or functions — never emit a tool"
+            " call. To perform one of the actions below, your ENTIRE reply must be a"
+            ' single line of JSON and nothing else: {"tool": "<name>", "arguments": {...}}.'
+            " Output it as plain text; do not try to invoke it.\nActions:\n" + doc +
+            "\nIf no action is needed, just answer in one or two short spoken sentences.")
 
 
 def _serialize_for_claude(messages):
@@ -609,6 +610,7 @@ def stream_claude(messages, tools=None):
 
     buf = ""
     mode = None  # None=undecided, "text"=stream it, "tool"=buffer until done
+    whole = ""   # fallback: full text from the final assistant message
     try:
         for line in proc.stdout:
             line = line.strip()
@@ -618,7 +620,12 @@ def stream_claude(messages, tools=None):
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if ev.get("type") != "stream_event":
+            etype = ev.get("type")
+            if etype == "assistant":     # complete message — fallback if no deltas stream
+                whole = "".join(b.get("text", "") for b in ev.get("message", {}).get("content", [])
+                                if b.get("type") == "text")
+                continue
+            if etype != "stream_event":
                 continue
             inner = ev.get("event") or {}
             if inner.get("type") != "content_block_delta":
@@ -645,6 +652,13 @@ def stream_claude(messages, tools=None):
             pass
         proc.wait()
 
+    # No deltas streamed (e.g. the model thought first, then emitted the whole
+    # message at once) — decide from the final assistant text instead.
+    if mode is None and whole.strip():
+        buf = whole
+        mode = "tool" if (tools and whole.lstrip()[0] == "{") else "text"
+        if mode == "text":
+            yield ("text", whole)
     if mode == "tool":
         calls = _parse_claude_tool(buf)
         if calls:

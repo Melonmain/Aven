@@ -30,6 +30,8 @@ import os
 import pathlib
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -50,6 +52,11 @@ _TTS_HOST, TTS_WS_PORT = service_addr("tts")          # the TTS node
 DEFAULT_MODEL = _CFG["llm"]["model"]
 DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
 KEEPALIVE_MIN = _CFG["llm"].get("keepalive_minutes", 0)
+
+# Backend: "claude" (Claude CLI, default) or "rkllama" (local NPU model).
+BACKEND = (_CFG["llm"].get("backend") or "claude").strip().lower()
+CLAUDE_BIN = _CFG["llm"].get("claude_bin") or shutil.which("claude") or "claude"
+CLAUDE_MODEL = _CFG["llm"].get("claude_model")   # None -> the CLI's default model
 
 # --- Tools (Tasmota plugs + weather) ----------------------------------------
 LIGHTS = _CFG.get("lights", {}) or {}
@@ -449,6 +456,14 @@ def extract_clauses(buffer, min_soft_len=18, max_len=120):
 
 
 def stream_llm(messages, model, tools=None):
+    """Stream a turn from the active backend; yield ('text', token) / ('tool', [calls])."""
+    if BACKEND == "claude":
+        yield from stream_claude(messages, tools)
+    else:
+        yield from _stream_rkllama(messages, model, tools)
+
+
+def _stream_rkllama(messages, model, tools=None):
     """Stream from rkllama; yield ('text', token) or ('tool', [calls]).
 
     Tool-call argument fragments are accumulated by index (rkllama sends them as
@@ -505,6 +520,137 @@ def stream_llm(messages, model, tools=None):
                 args = {}
             calls.append({"id": acc.get("id", ""), "name": acc["name"], "arguments": args})
         yield ("tool", calls)
+
+
+# --- Claude CLI backend -----------------------------------------------------
+# Uses the installed `claude` CLI (the user's own auth — no API key) as the
+# brain. Tools aren't native to the CLI, so we describe them in the system
+# prompt and ask the model to reply with a single JSON line, which we parse back
+# into the same ('tool', [calls]) shape the rest of the pipeline expects.
+_CLAUDE_BLOCKED_TOOLS = ["Bash", "Read", "Edit", "Write", "WebFetch", "WebSearch",
+                         "Glob", "Grep", "Task", "NotebookEdit"]
+
+
+def _claude_tool_doc(tools):
+    lines = []
+    for t in tools or []:
+        fn = t["function"]
+        props = (fn.get("parameters") or {}).get("properties") or {}
+        sig = ", ".join(
+            f"{k}: {v.get('type', 'string')}" + (f" ({'|'.join(v['enum'])})" if v.get("enum") else "")
+            for k, v in props.items())
+        lines.append(f'- {fn["name"]}({sig}) — {fn["description"]}')
+    return "\n".join(lines)
+
+
+def build_claude_system(base, tools):
+    """System prompt for the Claude backend: base prompt + JSON tool protocol."""
+    doc = _claude_tool_doc(tools)
+    if not doc:
+        return base
+    return (base + "\n\nYou can take actions with these tools. To use one, reply with "
+            'ONLY a single line of JSON and nothing else: {"tool": "<name>", "arguments": {...}}\n'
+            "Tools:\n" + doc +
+            "\nIf no tool is needed, just answer in one or two short spoken sentences.")
+
+
+def _serialize_for_claude(messages):
+    """Render the OpenAI-style history into a plain transcript for `claude -p`."""
+    lines = []
+    for m in messages:
+        role = m.get("role")
+        if role == "user":
+            lines.append("User: " + (m.get("content") or ""))
+        elif role == "assistant":
+            if m.get("tool_calls"):
+                fn = m["tool_calls"][0]["function"]
+                lines.append(f'Assistant used {fn["name"]}({fn["arguments"]})')
+            elif m.get("content"):
+                lines.append("Assistant: " + m["content"])
+        elif role == "tool":
+            lines.append("Tool result: " + (m.get("content") or ""))
+    return "\n".join(lines)
+
+
+def _parse_claude_tool(text):
+    """If the reply is a {"tool":...} JSON directive, return [call]; else None."""
+    s = text.strip()
+    if not (s.startswith("{") and '"tool"' in s):
+        return None
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    name = obj.get("tool")
+    if not name:
+        return None
+    return [{"id": "call_0", "name": name, "arguments": obj.get("arguments") or {}}]
+
+
+def stream_claude(messages, tools=None):
+    """Stream a turn via the Claude CLI; yield ('text', token) / ('tool', [calls])."""
+    system = messages[0]["content"] if messages and messages[0].get("role") == "system" else DEFAULT_SYSTEM
+    cmd = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose",
+           "--include-partial-messages", "--max-turns", "1",
+           "--system-prompt", build_claude_system(system, tools),
+           "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+    if CLAUDE_MODEL:
+        cmd += ["--model", CLAUDE_MODEL]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError as exc:
+        print(f"[claude] launch failed: {exc}", flush=True)
+        yield ("text", "Sorry, I couldn't reach Claude.")
+        return
+
+    proc.stdin.write(_serialize_for_claude(messages))
+    proc.stdin.close()
+
+    buf = ""
+    mode = None  # None=undecided, "text"=stream it, "tool"=buffer until done
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") != "stream_event":
+                continue
+            inner = ev.get("event") or {}
+            if inner.get("type") != "content_block_delta":
+                continue
+            delta = inner.get("delta") or {}
+            if delta.get("type") != "text_delta":   # ignore thinking deltas
+                continue
+            piece = delta.get("text") or ""
+            if not piece:
+                continue
+            buf += piece
+            if mode is None:
+                stripped = buf.lstrip()
+                if not stripped:
+                    continue
+                # A tool directive (only when tools are offered) starts with '{'.
+                mode = "tool" if (tools and stripped[0] == "{") else "text"
+            if mode == "text":
+                yield ("text", piece)
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        proc.wait()
+
+    if mode == "tool":
+        calls = _parse_claude_tool(buf)
+        if calls:
+            yield ("tool", calls)
+        else:                          # looked like JSON but wasn't a tool — speak it
+            yield ("text", buf)
 
 
 def synth_clause(tts_ws, text):
@@ -751,17 +897,24 @@ def main():
         print("\033[31mMissing dependency 'websockets'.\033[0m Install: .venv/bin/pip install websockets")
         sys.exit(1)
 
-    model = pick_model(args.model)
+    if BACKEND == "claude":
+        model = CLAUDE_MODEL or "cli default"
+        backend_desc = f"claude CLI ({CLAUDE_BIN})"
+    else:
+        model = pick_model(args.model)
+        backend_desc = f"rkllama (via {LLM_URL})"
     tts_url = f"ws://{args.tts_host}:{args.tts_port}"
     handler = make_handler(tts_url, model, args.system)
 
-    if KEEPALIVE_MIN > 0:
+    if BACKEND != "claude" and KEEPALIVE_MIN > 0:
         threading.Thread(target=keep_warm, args=(model, KEEPALIVE_MIN), daemon=True).start()
 
     print("\033[32mLLM node ready.\033[0m")
-    print(f"  LLM model : {model}  (via {LLM_URL})")
+    print(f"  Backend   : {backend_desc}")
+    print(f"  LLM model : {model}")
     print(f"  TTS node  : {tts_url}")
-    print(f"  Keep-warm : {'every %d min' % KEEPALIVE_MIN if KEEPALIVE_MIN > 0 else 'off'}")
+    if BACKEND != "claude":
+        print(f"  Keep-warm : {'every %d min' % KEEPALIVE_MIN if KEEPALIVE_MIN > 0 else 'off'}")
     print(f"  Listening : ws://{args.host}:{args.port}  (laptop connects to ws://{ROCK5C_IP}:{args.port})")
     with serve(handler, args.host, args.port) as server:
         server.serve_forever()

@@ -34,12 +34,14 @@ flowchart TB
         stt["<b>stt_server</b> :8767<br/>faster-whisper · CPU"]
         llm["<b>llm_server</b> :8765<br/>orchestrator + tools"]
         rk["<b>rkllama</b> :8080<br/>Qwen2.5-3B · NPU"]
+        cl["<b>Claude CLI</b><br/>claude -p · cloud"]
         rasp["Raspotify / librespot<br/>Spotify Connect 'Aven'"]
 
         coord -.->|frames| ww
         coord -->|PCM| stt -->|transcript| coord
         coord -->|text| llm
-        llm <-->|HTTP| rk
+        llm <-->|backend=rkllama| rk
+        llm <-->|backend=claude| cl
     end
 
     subgraph ttsb["🗣 TTS Rock 5C · 100.113.61.126"]
@@ -172,6 +174,20 @@ Fresh boards only. Requires [UV](https://docs.astral.sh/uv/) and submodules:
 `git submodule update --init --recursive`.
 
 ### 1. LLM node (main board — 100.108.158.94)
+
+**Two brains, toggle in config.** `llm.backend` selects who answers:
+
+- **`claude`** (default) — the installed [Claude CLI](https://claude.com/claude-code)
+  (`claude -p`), using your own Claude auth (no API key). Better quality and
+  faster first token; needs internet. `llm_server` shells out to it, streams the
+  reply, and parses tool use from a JSON directive. Optionally pin a model with
+  `llm.claude_model` (e.g. `claude-haiku-4-5` for snappier voice replies).
+- **`rkllama`** — the fully-offline local NPU model (Qwen2.5-3B), set up below.
+
+Flip `llm.backend` in [`config.yaml`](config.yaml) and restart `llm_server` — no
+other change. Under `claude`, the daemon skips `rkllama` entirely (the NPU stays
+free), and the coordinator log labels each turn `CLAUDE` vs `LLM` accordingly.
+The rest of this section sets up the **rkllama** backend.
 
 rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312) and
 can't be launched with `uv run` directly (its pyproject declares the NPU wheel

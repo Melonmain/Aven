@@ -69,6 +69,14 @@ pids_of() {
 
 mic_present() { arecord -l 2>/dev/null | grep -q '^card'; }
 
+# Which LLM brain config.yaml selects ("claude" or "rkllama"); defaults to claude.
+llm_backend() {
+  local b
+  b=$(grep -E "^[[:space:]]*backend:[[:space:]]*" "$REPO/config.yaml" 2>/dev/null \
+        | head -1 | sed -E 's/.*backend:[[:space:]]*"?([A-Za-z]+)"?.*/\1/')
+  echo "${b:-claude}"
+}
+
 launch() {  # name
   local name=$1 dir cmd pidf
   dir=$(svc_dir "$name"); cmd=$(svc_cmd "$name"); pidf=$(pidfile "$name")
@@ -87,6 +95,10 @@ start_one() {
   if [ "$name" = coordinator ] && ! mic_present; then
     printf "  ${C_Y}[skip]${C_0}  %-11s no capture device — connect the USB mic, then: %s start coordinator\n" \
            "$name" "$0"; return 0
+  fi
+  # The local NPU model is only needed for the rkllama backend; skip it on claude.
+  if [ "$name" = rkllama ] && [ "$(llm_backend)" = claude ]; then
+    printf "  ${C_Y}[skip]${C_0}  %-11s llm.backend=claude (local LLM not needed)\n" "$name"; return 0
   fi
   # rkllama's prompt cache can be left corrupt by an unclean shutdown, which
   # silently makes the model emit one token then stop (empty replies, no error).

@@ -45,6 +45,8 @@ CYAN, GREEN, RED, YELLOW, BOLD, RESET = (
 log = logging.getLogger("aven")
 
 _CFG = load_config()
+# Log label reflecting which brain the LLM node uses (see llm.backend in config).
+LLM_LABEL = "CLAUDE" if (_CFG.get("llm", {}).get("backend") or "claude").strip().lower() == "claude" else "LLM"
 RATE = 16000
 FRAME = 1280  # 80 ms @ 16 kHz
 
@@ -228,7 +230,7 @@ def _stream_reply(ws, text, player):
     rate = None
 
     ws.send(json.dumps({"text": text}))
-    log.info("LLM  : sent prompt (%d chars)", len(text))
+    log.info("%-4s : sent prompt (%d chars)", LLM_LABEL, len(text))
     sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
     sys.stdout.flush()
     with PLAYBACK_LOCK:                       # exclusive speaker for this reply
@@ -252,7 +254,7 @@ def _stream_reply(ws, text, player):
             elif etype == "llm":
                 if first_tok is None:
                     first_tok = time.perf_counter()
-                    log.info("LLM  : first token @ %.0f ms", ms(first_tok))
+                    log.info("%-4s : first token @ %.0f ms", LLM_LABEL, ms(first_tok))
                 sys.stdout.write(event["text"]); sys.stdout.flush()
             elif etype == "timer":
                 schedule_timer(int(event.get("seconds", 0)), player)
@@ -267,7 +269,7 @@ def _stream_reply(ws, text, player):
 
     audio_s = nbytes / 2 / rate if rate else 0.0
     log.info("TTS  : received %d PCM chunks, %d bytes (~%.2fs audio)", chunks, nbytes, audio_s)
-    log.info("LLM/TTS done @ %.0f ms (first_token %.0f ms, first_audio %.0f ms)",
+    log.info("%s/TTS done @ %.0f ms (first_token %.0f ms, first_audio %.0f ms)", LLM_LABEL,
              ms(done_t) if done_t else 0, ms(first_tok) if first_tok else 0,
              ms(first_audio) if first_audio else 0)
     return {"total_s": (done_t - t0) if done_t else 0.0, "audio_s": audio_s}

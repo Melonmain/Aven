@@ -61,6 +61,13 @@ spotify:
   device: Aven
 
 llm:
+  # Which brain answers: "claude" (the installed Claude CLI — better quality,
+  # uses your Claude auth, needs internet) or "rkllama" (the local NPU model,
+  # fully offline). Toggle here; no other change needed.
+  backend: claude
+  # Optional model for the claude backend (e.g. claude-haiku-4-5 for snappier
+  # voice replies). null = the CLI's default model.
+  claude_model: null
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
   # Ping rkllama every N minutes so it never unloads the model (rkllama drops it

@@ -107,6 +107,10 @@ def main():
     parser.add_argument("--vad-filter", action="store_true",
                         default=_STT.get("vad_filter", True))
     parser.add_argument("--initial-prompt", default=_STT.get("initial_prompt"))
+    parser.add_argument("--cpu-threads", type=int, default=_STT.get("cpu_threads", 4),
+                        help="CTranslate2 worker threads. On RK3588 (big.LITTLE) 4 "
+                             "(pinned to the A76 cores) beats 8 — mixing the slow A55 "
+                             "cores into the GEMM pool stalls the fast threads.")
     args = parser.parse_args()
 
     try:
@@ -117,12 +121,13 @@ def main():
     from faster_whisper import WhisperModel
 
     print(f"Loading faster-whisper '{args.model}' (cpu/{args.compute_type})…", flush=True)
-    model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type)
+    model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type,
+                         cpu_threads=args.cpu_threads)
     handler = make_handler(model, args.language, args.beam_size,
                            args.vad_filter, args.initial_prompt)
 
     print("\033[32mSTT node ready.\033[0m")
-    print(f"  Model     : {args.model}  (cpu/{args.compute_type}, beam {args.beam_size})")
+    print(f"  Model     : {args.model}  (cpu/{args.compute_type}, beam {args.beam_size}, {args.cpu_threads} threads)")
     print(f"  Language  : {args.language or 'auto'}")
     print(f"  VAD filter: {args.vad_filter}")
     print(f"  Listening : ws://{args.host}:{args.port}  (reach me at ws://{ROCK5C_IP}:{args.port})")

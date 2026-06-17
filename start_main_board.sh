@@ -40,7 +40,10 @@ svc_cmd()  {
   case "$1" in
     rkllama)     echo "$RKLLAMA_DIR/venv/bin/rkllama_server --models $RKLLAMA_MODELS";;
     llm_server)  echo "uv run python llm_server.py";;
-    stt)         echo "uv run python stt_server.py";;
+    # Pin STT to the RK3588 A76 "big" cores (4-7). faster-whisper's GEMM pool
+    # runs fastest on 4 fast cores; letting the scheduler park a worker on a slow
+    # A55 (cores 0-3) stalls the whole transcribe at the sync barrier.
+    stt)         echo "taskset -c 4-7 uv run python stt_server.py";;
     coordinator) echo "uv run python coordinator.py";;
   esac
 }

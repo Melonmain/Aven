@@ -107,6 +107,11 @@ stt:
   language: en          # null = autodetect
   compute_type: int8    # int8 is fastest on CPU; int8_float32 / float32 also work
   beam_size: 5          # 1 = greedy (fastest); higher is slower but more accurate
+  # CTranslate2 worker threads. The RK3588 is big.LITTLE (4x fast A76 + 4x slow
+  # A55); 4 threads pinned to the A76 cores beat 8 — adding the slow cores to the
+  # GEMM pool stalls the fast threads at the sync barrier. start_main_board.sh
+  # pins STT to cores 4-7 (the A76s) with taskset to match.
+  cpu_threads: 4
   # Silero VAD trims non-speech inside the clip before transcribing — kills the
   # "made-up words from background noise" hallucinations. Recommended on.
   vad_filter: true

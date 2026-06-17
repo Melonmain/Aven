@@ -91,8 +91,9 @@ if VOLUME_ENABLED:
 if RESEARCH_ENABLED:
     DEFAULT_SYSTEM += (" Use search_web to look up facts, news, or anything you're"
                        " unsure about or that may have changed recently.")
-DEFAULT_SYSTEM += (" Use set_timer to start a timer for a number of minutes, get_time"
-                   " for the current time, and get_date for today's date.")
+DEFAULT_SYSTEM += (" Use set_timer to start a timer for a number of minutes, cancel_timer"
+                   " to cancel a running timer, timer_time_left to say how long is left on"
+                   " it, get_time for the current time, and get_date for today's date.")
 
 
 def build_tools():
@@ -118,6 +119,16 @@ def build_tools():
         "description": "Start a timer for a number of minutes.",
         "parameters": {"type": "object", "properties": {
             "minutes": {"type": "number"}}, "required": ["minutes"]},
+    }})
+    tools.append({"type": "function", "function": {
+        "name": "cancel_timer",
+        "description": "Cancel a running timer.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }})
+    tools.append({"type": "function", "function": {
+        "name": "timer_time_left",
+        "description": "Say how much time is left on the running timer.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
     }})
     tools.append({"type": "function", "function": {
         "name": "get_time",
@@ -509,6 +520,14 @@ def handle_tool_calls(calls):
             controls.append({"type": "timer", "seconds": secs})
             print(f"[tool] set_timer({secs}s)", flush=True)
             parts.append(f"Okay, timer set for {_fmt_duration(secs)}.")
+        elif name == "cancel_timer":
+            # The timer lives on the coordinator (only it has the speaker), so it
+            # cancels and speaks the result; we emit no spoken reply here.
+            controls.append({"type": "cancel_timer"})
+            print("[tool] cancel_timer", flush=True)
+        elif name == "timer_time_left":
+            controls.append({"type": "query_timer"})
+            print("[tool] timer_time_left", flush=True)
         elif name == "get_time":
             now = time.strftime("%H:%M")
             print(f"[tool] get_time -> {now}", flush=True)
@@ -527,7 +546,12 @@ def handle_tool_calls(calls):
             parts.append(stop_music())
         else:
             parts.append("Sorry, I can't do that.")
-    return (" ".join(parts) if parts else "Okay."), controls
+    # Tools that only emit a control event (the coordinator speaks the result)
+    # contribute no parts — return an empty reply so we don't speak a stray "Okay".
+    reply = " ".join(p for p in parts if p)
+    if not reply and not controls:
+        reply = "Okay."
+    return reply, controls
 
 
 def run_tool(call):

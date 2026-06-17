@@ -52,7 +52,11 @@ FRAME = 1280  # 80 ms @ 16 kHz
 
 # Serialize speaker use so a firing timer never overlaps reply/beep playback.
 PLAYBACK_LOCK = threading.Lock()
-_timers = []  # keep references so scheduled timers aren't garbage-collected
+# Active timers: each is {"deadline": epoch_secs, "timer": threading.Timer}. The
+# lock guards the list since timers fire on their own threads. Tracking the
+# deadline lets us answer "how much time is left" and cancel pending timers.
+_timers = []
+_timers_lock = threading.Lock()
 
 
 def speaker_present(card):
@@ -233,6 +237,7 @@ def _stream_reply(ws, text, player):
     log.info("%-4s : sent prompt (%d chars)", LLM_LABEL, len(text))
     sys.stdout.write(f"{CYAN}{BOLD}Aven:{RESET} ")
     sys.stdout.flush()
+    pending_say = None                        # timer answer the coordinator speaks
     with PLAYBACK_LOCK:                       # exclusive speaker for this reply
         for message in ws:
             if isinstance(message, (bytes, bytearray)):
@@ -258,6 +263,10 @@ def _stream_reply(ws, text, player):
                 sys.stdout.write(event["text"]); sys.stdout.flush()
             elif etype == "timer":
                 schedule_timer(int(event.get("seconds", 0)), player)
+            elif etype == "cancel_timer":
+                pending_say = cancel_timers()
+            elif etype == "query_timer":
+                pending_say = timer_time_left()
             elif etype == "error":
                 log.warning("server error: %s", event.get("message"))
                 print(f"\n{RED}server error: {event.get('message')}{RESET}")
@@ -265,6 +274,10 @@ def _stream_reply(ws, text, player):
                 done_t = time.perf_counter()
                 break
         player.end()                          # release/re-probe speaker for next turn
+        # cancel_timer / time-left replies are spoken by us (the timer is ours),
+        # since the server has no view of the local timer state.
+        if pending_say:
+            tts_say(pending_say, player)
     print()
 
     audio_s = nbytes / 2 / rate if rate else 0.0
@@ -384,7 +397,21 @@ def tts_say(text, player):
         player.end()
 
 
-def fire_timer(player):
+def _fmt_left(secs):
+    """Spoken remaining time, e.g. '3 minutes 5 seconds' / '40 seconds'."""
+    secs = max(0, int(round(secs)))
+    m, s = divmod(secs, 60)
+    if m and s:
+        return f"{m} minute{'' if m == 1 else 's'} and {s} second{'' if s == 1 else 's'}"
+    if m:
+        return f"{m} minute{'' if m == 1 else 's'}"
+    return f"{s} second{'' if s == 1 else 's'}"
+
+
+def fire_timer(player, rec):
+    with _timers_lock:
+        if rec in _timers:
+            _timers.remove(rec)
     log.info("TIMER: finished")
     print(f"\n{YELLOW}⏰ timer finished{RESET}", flush=True)
     with PLAYBACK_LOCK:
@@ -394,10 +421,38 @@ def fire_timer(player):
 
 def schedule_timer(seconds, player):
     log.info("TIMER: set for %ds", seconds)
-    t = threading.Timer(seconds, fire_timer, args=(player,))
+    rec = {"deadline": time.time() + seconds}
+    t = threading.Timer(seconds, fire_timer, args=(player, rec))
     t.daemon = True
+    rec["timer"] = t
+    with _timers_lock:
+        _timers.append(rec)
     t.start()
-    _timers.append(t)
+
+
+def cancel_timers():
+    """Cancel all pending timers; return the spoken confirmation."""
+    with _timers_lock:
+        recs = list(_timers)
+        _timers.clear()
+    for rec in recs:
+        rec["timer"].cancel()
+    log.info("TIMER: cancelled %d", len(recs))
+    if not recs:
+        return "There's no timer running."
+    if len(recs) == 1:
+        return "Okay, I cancelled the timer."
+    return f"Okay, I cancelled all {len(recs)} timers."
+
+
+def timer_time_left():
+    """Spoken remaining time on the soonest timer, or that none is running."""
+    now = time.time()
+    with _timers_lock:
+        remaining = sorted(rec["deadline"] - now for rec in _timers)
+    if not remaining:
+        return "There's no timer running."
+    return f"You have {_fmt_left(remaining[0])} left on your timer."
 
 
 # --------------------------------------------------------------------------- #

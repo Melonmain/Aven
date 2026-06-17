@@ -51,7 +51,7 @@ flowchart TB
         voice <--> engine
     end
 
-    tools["🛠 Tools<br/>lights · weather · timer · time · date<br/>volume · web search · play/stop/resume music"]
+    tools["🛠 Tools<br/>lights · weather · timer (set/cancel/left) · time · date<br/>volume · web search · play/stop/resume music"]
 
     mic --> coord
     llm -.->|tool calls| tools
@@ -310,6 +310,8 @@ never depend on a 3B model deciding to call a tool.
 | *"turn off the bed light"*, *"lights on"*, *"all lights off"* | `set_light` | Switches Tasmota plugs over HTTP. **Shortcut** for plain on/off phrasing. |
 | *"what's the weather?"* | `get_weather` | WeatherAPI → result fed back so the model phrases the reply. |
 | *"set a timer for 5 minutes"* | `set_timer` | Confirms, then the **coordinator** schedules it locally; beeps + "your timer is finished" when it fires. |
+| *"cancel the timer"* | `cancel_timer` | Cancels the running timer(s); the coordinator (which owns the timer) speaks the result. |
+| *"how much time is left?"* | `timer_time_left` | Speaks the remaining time on the soonest timer. |
 | *"what time is it?"* | `get_time` | Board's local time, spoken directly. |
 | *"what's the date today?"* | `get_date` | Today's date, spoken directly. |
 | *"who won the 2025 Nobel Prize in Physics?"* | `search_web` | Live internet research via a dedicated Claude web-search call (reuses the host's Claude auth, no API key); the answer is fed back so the model phrases the reply. |

@@ -51,7 +51,7 @@ flowchart TB
         voice <--> engine
     end
 
-    tools["🛠 Tools<br/>lights · weather · timer<br/>time · play/stop/resume music"]
+    tools["🛠 Tools<br/>lights · weather · timer · time · date<br/>volume · web search · play/stop/resume music"]
 
     mic --> coord
     llm -.->|tool calls| tools
@@ -311,6 +311,9 @@ never depend on a 3B model deciding to call a tool.
 | *"what's the weather?"* | `get_weather` | WeatherAPI → result fed back so the model phrases the reply. |
 | *"set a timer for 5 minutes"* | `set_timer` | Confirms, then the **coordinator** schedules it locally; beeps + "your timer is finished" when it fires. |
 | *"what time is it?"* | `get_time` | Board's local time, spoken directly. |
+| *"what's the date today?"* | `get_date` | Today's date, spoken directly. |
+| *"who won the 2025 Nobel Prize in Physics?"* | `search_web` | Live internet research via a dedicated Claude web-search call (reuses the host's Claude auth, no API key); the answer is fed back so the model phrases the reply. |
+| *"turn the volume up"*, *"set the volume to 50"* | `set_volume` | Adjusts the speaker's ALSA `PCM` level (up/down/exact). |
 | *"play some Daft Punk"* | `play_music` | Spotify search + playback on the `Aven` device. |
 | *"stop"*, *"pause"*, *"shut up"* | `stop_music` | Pauses Spotify. **Shortcut.** |
 | *"continue"*, *"resume"*, *"keep playing"* | `resume_music` | Resumes the last Spotify playback. **Shortcut.** |

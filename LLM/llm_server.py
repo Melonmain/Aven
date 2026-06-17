@@ -71,6 +71,14 @@ SPOTIFY_ENABLED = bool(os.environ.get("SPOTIPY_CLIENT_ID")
                        and os.environ.get("SPOTIPY_CLIENT_SECRET"))
 SPOTIFY_CACHE = str(pathlib.Path(__file__).resolve().parent / ".spotify_cache")
 
+# Research tool: delegate to a dedicated Claude CLI call with web tools enabled.
+# Reuses the host's Claude auth (no API key in the repo). Available whenever the
+# CLI is present, regardless of which brain answers normally.
+RESEARCH_ENABLED = bool(shutil.which(CLAUDE_BIN) or CLAUDE_BIN)
+# Volume tool: ALSA mixer on the speaker card (same board as this server).
+SPEAKER_CARD = (_CFG.get("coordinator", {}) or {}).get("speaker_card") or "V3"
+VOLUME_ENABLED = bool(shutil.which("amixer"))
+
 if LIGHTS:
     DEFAULT_SYSTEM += " Use set_light to turn lights on or off when asked; don't confirm first."
 if WEATHER_ENABLED:
@@ -78,7 +86,13 @@ if WEATHER_ENABLED:
 if SPOTIFY_ENABLED:
     DEFAULT_SYSTEM += (" Use play_music to play music, resume_music to continue"
                       " paused music, and stop_music to stop it on Spotify.")
-DEFAULT_SYSTEM += " Use set_timer to start a timer for a number of minutes, and get_time for the current time."
+if VOLUME_ENABLED:
+    DEFAULT_SYSTEM += " Use set_volume to make the speaker louder or quieter."
+if RESEARCH_ENABLED:
+    DEFAULT_SYSTEM += (" Use search_web to look up facts, news, or anything you're"
+                       " unsure about or that may have changed recently.")
+DEFAULT_SYSTEM += (" Use set_timer to start a timer for a number of minutes, get_time"
+                   " for the current time, and get_date for today's date.")
 
 
 def build_tools():
@@ -110,6 +124,31 @@ def build_tools():
         "description": "Get the current local time.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }})
+    tools.append({"type": "function", "function": {
+        "name": "get_date",
+        "description": "Get today's date.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }})
+    if VOLUME_ENABLED:
+        tools.append({"type": "function", "function": {
+            "name": "set_volume",
+            "description": "Change the speaker volume. Use direction 'up' or 'down' to "
+                           "raise or lower it, or 'set' with a level (0-100) for an exact level.",
+            "parameters": {"type": "object", "properties": {
+                "direction": {"type": "string", "enum": ["up", "down", "set"]},
+                "level": {"type": "number",
+                          "description": "0-100; the target for 'set', or step size for up/down"},
+            }, "required": ["direction"]},
+        }})
+    if RESEARCH_ENABLED:
+        tools.append({"type": "function", "function": {
+            "name": "search_web",
+            "description": "Search the internet to answer a factual question or look up "
+                           "current information. Pass a clear search query.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "what to look up"}},
+                "required": ["query"]},
+        }})
     if SPOTIFY_ENABLED:
         tools.append({"type": "function", "function": {
             "name": "play_music",
@@ -132,6 +171,10 @@ def build_tools():
 
 
 TOOLS = build_tools()
+
+# Data tools return information the model must phrase into a spoken answer (fed
+# back via data_followup), unlike action tools which get a fixed confirmation.
+DATA_TOOLS = {"get_weather", "search_web"}
 
 
 def get_weather():
@@ -284,6 +327,85 @@ def resume_after_wake():
         return False
 
 
+# --- Volume (set_volume) ----------------------------------------------------
+def set_volume(direction, level=None):
+    """Adjust the speaker volume via ALSA (the 'PCM' control on the USB card)."""
+    if not VOLUME_ENABLED:
+        return "Volume control isn't available."
+    pct = None
+    if direction == "set":
+        try:
+            pct = max(0, min(100, int(round(float(level)))))
+        except (TypeError, ValueError):
+            return "Sorry, I didn't catch the volume level."
+        arg = f"{pct}%"
+    elif direction in ("up", "down"):
+        step = 15
+        if level is not None:
+            try:
+                step = max(1, min(100, int(round(float(level)))))
+            except (TypeError, ValueError):
+                step = 15
+        arg = f"{step}%{'+' if direction == 'up' else '-'}"
+    else:
+        return "Sorry, I didn't catch that volume change."
+    try:
+        # -M maps to a perceptual (human-ear) scale so "50%" sounds half as loud.
+        subprocess.run(["amixer", "-c", SPEAKER_CARD, "-M", "sset", "PCM", arg],
+                       capture_output=True, text=True, timeout=5, check=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] set_volume({direction},{level}) -> FAIL: {exc}", flush=True)
+        return "Sorry, I couldn't change the volume."
+    print(f"[tool] set_volume -> PCM {arg}", flush=True)
+    if direction == "set":
+        return f"Okay, volume set to {pct} percent."
+    return "Okay, turned it " + ("up." if direction == "up" else "down.")
+
+
+# --- Research (search_web) --------------------------------------------------
+_RESEARCH_SYSTEM = (
+    "You are a research assistant with web access. Search the web and answer the "
+    "question factually and concisely in one to three short sentences suitable for "
+    "reading aloud. Plain text only: no markdown, no bullet points, no URLs, and do "
+    "not list sources.")
+
+
+def _strip_sources(text):
+    """The web-search model often appends a 'Sources:'/citation block and markdown
+    links despite instructions; drop them so the TTS reply stays clean."""
+    text = re.split(r"\n\s*(?:sources?|references?|citations?)\s*:", text, flags=re.I)[0]
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)   # [label](url) -> label
+    text = re.sub(r"https?://\S+", "", text)               # bare URLs
+    return " ".join(text.split()).strip()
+
+
+def search_web(query):
+    """Answer a question from the internet via a dedicated Claude web-search call."""
+    if not RESEARCH_ENABLED:
+        return json.dumps({"error": "web research is not available"})
+    try:
+        cmd = [CLAUDE_BIN, "-p", "--output-format", "text",
+               "--allowedTools", "WebSearch", "WebFetch",
+               "--max-turns", "10",
+               "--system-prompt", _RESEARCH_SYSTEM]
+        if CLAUDE_MODEL:
+            cmd += ["--model", CLAUDE_MODEL]
+        cmd.append(query)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        answer = _strip_sources((out.stdout or "").strip())
+        if not answer:
+            print(f"[tool] search_web({query!r}) -> empty (rc={out.returncode})", flush=True)
+            return json.dumps({"error": "no result found"})
+        print(f"[tool] search_web({query!r}) -> {answer[:80]!r}", flush=True)
+        return json.dumps({"query": query, "answer": answer})
+    except subprocess.TimeoutExpired:
+        print(f"[tool] search_web({query!r}) -> TIMEOUT", flush=True)
+        return json.dumps({"error": "the search timed out"})
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] search_web({query!r}) -> FAIL: {exc}", flush=True)
+        return json.dumps({"error": f"search failed: {exc}"})
+
+
 # Deterministic shortcuts: critical commands the small model fumbles as tool
 # calls (it sometimes just says "stopped" without doing it). Handle them here,
 # before the LLM, so they always work. Returns a spoken reply or None.
@@ -391,6 +513,12 @@ def handle_tool_calls(calls):
             now = time.strftime("%H:%M")
             print(f"[tool] get_time -> {now}", flush=True)
             parts.append(f"It's {now}.")
+        elif name == "get_date":
+            today = time.strftime("%A, %B %-d, %Y")
+            print(f"[tool] get_date -> {today}", flush=True)
+            parts.append(f"Today is {today}.")
+        elif name == "set_volume":
+            parts.append(set_volume(args.get("direction"), args.get("level")))
         elif name == "play_music":
             parts.append(play_music(args.get("query", "")))
         elif name == "resume_music":
@@ -408,6 +536,8 @@ def run_tool(call):
     args = call.get("arguments") or {}
     if name == "get_weather":
         return get_weather()
+    if name == "search_web":
+        return search_web(args.get("query", ""))
     if name == "set_light":
         ok, err = execute_light(args.get("light"), args.get("state"))
         return json.dumps({"ok": ok, "light": args.get("light"),
@@ -819,13 +949,15 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
             return claude_session.send(prompt, detect_tool=True)
         return stream_llm(history, model, TOOLS)
 
-    def weather_followup(calls):
-        """Feed the data-tool result back so the model answers in words."""
+    def data_followup(calls):
+        """Feed a data-tool result (weather/web search) back so the model answers in words."""
+        data = [c for c in calls if c.get("name") in DATA_TOOLS]
         if use_claude:
-            results = "; ".join(run_tool(c) for c in calls if c.get("name") == "get_weather")
+            results = "; ".join(f"{c.get('name')} returned: {run_tool(c)}" for c in data)
             return claude_session.send(
-                f"The get_weather tool returned: {results}\nAnswer my question now"
+                f"Tool results — {results}\nUsing only this, answer my question now"
                 " in one or two short spoken sentences.", detect_tool=False)
+        calls = data
         history.append({
             "role": "assistant", "content": None,
             "tool_calls": [{
@@ -863,8 +995,8 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
                     for clause in clauses:
                         events.put(("clause", clause))
                 elif kind == "tool":
-                    if any(c.get("name") == "get_weather" for c in val):
-                        for kind2, val2 in weather_followup(val):
+                    if any(c.get("name") in DATA_TOOLS for c in val):
+                        for kind2, val2 in data_followup(val):
                             if kind2 == "text":
                                 collected.append(val2)
                                 events.put(("llm", val2))

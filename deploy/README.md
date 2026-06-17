@@ -31,6 +31,26 @@ It prints a URL; open it in any browser, log in, authorize. The redirect goes to
 port first: `ssh -L 5588:localhost:5588 <user>@<board>`. Once `credentials.json`
 is written it restarts raspotify, and `Aven` is available to play/stop/resume.
 
+## Onboard LEDs off (systemd)
+
+`aven-leds-off.service` clears every `/sys/class/leds/*` trigger and zeroes its
+brightness at boot (sysfs LED state resets each boot, so it must be reapplied).
+Separate from `aven.service` — it's host hardware state, not the voice stack.
+
+    sudo cp deploy/aven-leds-off.service /etc/systemd/system/aven-leds-off.service
+    sudo systemctl daemon-reload && sudo systemctl enable --now aven-leds-off.service
+
+## Speaker priming at boot
+
+The USB speaker (Pebble V3) can take ~2 min to enumerate after a cold boot. If
+the coordinator or Raspotify opens the shared dmix `default` before it's ready,
+the mixer comes up half-initialised and stays silent until something re-opens it
+(and the coordinator's PortAudio resolves its default output to the wrong card).
+`aven.service` runs `deploy/prime_speaker.sh` as an `ExecStartPre`: it waits up
+to 180 s for card `V3`, then does one short SILENT open of `default` to bring up
+dmix cleanly — so the coordinator only starts once the speaker is actually ready.
+Nothing to install separately; it's wired into `aven.service` below.
+
 ## Auto-start on boot (systemd)
 
 `aven.service` runs `start_main_board.sh` as user `melon` at boot, bringing up

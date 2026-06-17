@@ -18,10 +18,15 @@ Environment=HOME=/home/melon
 # the coordinator isn't skipped. Always exit 0 so a missing mic never blocks
 # the other services from starting.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do arecord -l 2>/dev/null | grep -q "^card" && break; sleep 1; done; exit 0'
+# The USB speaker (Pebble V3) can take ~2 min to enumerate after a cold boot.
+# Wait for it and prime the shared dmix mixer before the coordinator opens it,
+# otherwise the first playback hits a half-ready mixer and stays silent. Always
+# exits 0 — a missing speaker must not block the stack.
+ExecStartPre=/home/melon/Aven/deploy/prime_speaker.sh V3 180
 ExecStart=/home/melon/Aven/start_main_board.sh start
 ExecStop=/home/melon/Aven/start_main_board.sh stop
-# rkllama can take ~60s to load the model; give the whole start room.
-TimeoutStartSec=300
+# rkllama can take ~60s to load; the speaker wait can add ~2 min. Give room.
+TimeoutStartSec=480
 
 [Install]
 WantedBy=multi-user.target

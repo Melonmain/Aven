@@ -215,7 +215,8 @@ def _spotify():
         import spotipy
         from spotipy.oauth2 import SpotifyOAuth
         auth = SpotifyOAuth(
-            scope="user-modify-playback-state user-read-playback-state",
+            scope="user-modify-playback-state user-read-playback-state "
+                  "user-read-recently-played",
             redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
             cache_path=SPOTIFY_CACHE, open_browser=False)
         _spotify_client = (spotipy.Spotify(auth_manager=auth), auth)
@@ -265,9 +266,31 @@ def resume_music():
             dev_id = cur.get("device", {}).get("id")
         if not dev_id:
             return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
-        sp.start_playback(device_id=dev_id)  # no uris -> resume last context
-        print(f"[tool] resume_music -> resumed on {SPOTIFY_DEVICE}", flush=True)
-        return "Okay, resuming the music."
+        # A paused-but-still-live session resumes in place (keeps exact position).
+        if cur is not None:
+            sp.start_playback(device_id=dev_id)  # no uris -> resume in place
+            print(f"[tool] resume_music -> resumed paused session on {SPOTIFY_DEVICE}", flush=True)
+            return "Okay, resuming the music."
+        # No live session (it expired after a gap): bare resume does nothing, so
+        # restart the last track you played in its playlist/album context. Exact
+        # position isn't exposed by the API, so it restarts that track.
+        recent = sp.current_user_recently_played(limit=1).get("items", [])
+        if not recent:
+            return "There's nothing for me to resume."
+        track = recent[0]["track"]
+        ctx = (recent[0].get("context") or {}).get("uri")
+        started = False
+        if ctx:  # play the track within its context; some contexts reject offset
+            try:
+                sp.start_playback(device_id=dev_id, context_uri=ctx,
+                                  offset={"uri": track["uri"]})
+                started = True
+            except Exception as ce:  # noqa: BLE001
+                print(f"[tool] resume_music context retry ({ce})", flush=True)
+        if not started:
+            sp.start_playback(device_id=dev_id, uris=[track["uri"]])
+        print(f"[tool] resume_music -> restarted {track['name']!r}", flush=True)
+        return f"Okay, picking up with {track['name']}."
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] resume_music -> {exc}", flush=True)
         return "Sorry, there's nothing for me to resume."

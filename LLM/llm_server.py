@@ -86,8 +86,9 @@ if WEATHER_ENABLED:
 if SPOTIFY_ENABLED:
     DEFAULT_SYSTEM += (" Use play_music to play music, resume_music to continue"
                       " paused music, and stop_music to stop it on Spotify.")
-if VOLUME_ENABLED:
-    DEFAULT_SYSTEM += " Use set_volume to make the speaker louder or quieter."
+if VOLUME_ENABLED or SPOTIFY_ENABLED:
+    DEFAULT_SYSTEM += (" Use set_volume to make it louder or quieter; while music plays it"
+                       " changes the music volume, otherwise the assistant's.")
 if RESEARCH_ENABLED:
     DEFAULT_SYSTEM += (" Use search_web to look up facts, news, or anything you're"
                        " unsure about or that may have changed recently.")
@@ -140,11 +141,12 @@ def build_tools():
         "description": "Get today's date.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }})
-    if VOLUME_ENABLED:
+    if VOLUME_ENABLED or SPOTIFY_ENABLED:
         tools.append({"type": "function", "function": {
             "name": "set_volume",
-            "description": "Change the speaker volume. Use direction 'up' or 'down' to "
-                           "raise or lower it, or 'set' with a level (0-100) for an exact level.",
+            "description": "Change the volume (the music if Spotify is playing, otherwise "
+                           "the assistant). Use direction 'up' or 'down' to raise or lower "
+                           "it, or 'set' with a level (0-100) for an exact level.",
             "parameters": {"type": "object", "properties": {
                 "direction": {"type": "string", "enum": ["up", "down", "set"]},
                 "level": {"type": "number",
@@ -362,15 +364,75 @@ def resume_after_wake():
 
 
 # --- Volume (set_volume) ----------------------------------------------------
-def set_volume(direction, level=None):
-    """Adjust the speaker volume via ALSA (the 'PCM' control on the USB card)."""
-    if not VOLUME_ENABLED:
-        return "Volume control isn't available."
-    pct = None
+# Two independent volume domains:
+#  * Spotify's own Connect volume (set over the Web API), applied by librespot —
+#    changes the music without touching the assistant's voice.
+#  * The hardware ALSA 'PCM' control on the USB card — the master for everything
+#    (TTS + Spotify) at the DAC.
+# So when music is playing, volume commands target Spotify (what the user means);
+# otherwise they fall back to the hardware PCM.
+def _spotify_playing_device():
+    """(sp, device_id, volume_percent) if Spotify is actively playing here, else None."""
+    if not SPOTIFY_ENABLED:
+        return None
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return None
+        cur = sp.current_playback()
+        if not (cur and cur.get("is_playing")):
+            return None
+        dev = cur.get("device") or {}
+        if not dev.get("supports_volume") or dev.get("id") is None:
+            return None
+        vol = dev.get("volume_percent")
+        return sp, dev["id"], (vol if isinstance(vol, int) else 50)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] set_volume: spotify probe failed ({exc})", flush=True)
+        return None
+
+
+def _target_pct(direction, level, current, default_step=15):
+    """Resolve a spoken volume change to an absolute 0-100 percent, or None if bad."""
     if direction == "set":
         try:
-            pct = max(0, min(100, int(round(float(level)))))
+            return max(0, min(100, int(round(float(level)))))
         except (TypeError, ValueError):
+            return None
+    if direction in ("up", "down"):
+        step = default_step
+        if level is not None:
+            try:
+                step = max(1, min(100, int(round(float(level)))))
+            except (TypeError, ValueError):
+                step = default_step
+        return max(0, min(100, current + (step if direction == "up" else -step)))
+    return None
+
+
+def set_volume(direction, level=None):
+    """Change the music volume (Spotify) if it's playing, else the hardware PCM."""
+    spotify = _spotify_playing_device()
+    if spotify:
+        sp, dev_id, curvol = spotify
+        target = _target_pct(direction, level, curvol)
+        if target is None:
+            return "Sorry, I didn't catch that volume change."
+        try:
+            sp.volume(target, device_id=dev_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tool] set_volume(spotify {direction},{level}) -> FAIL: {exc}", flush=True)
+            return "Sorry, I couldn't change the music volume."
+        print(f"[tool] set_volume -> spotify {target}%", flush=True)
+        if direction == "set":
+            return f"Okay, music volume set to {target} percent."
+        return "Okay, turned the music " + ("up." if direction == "up" else "down.")
+
+    if not VOLUME_ENABLED:
+        return "Volume control isn't available."
+    if direction == "set":
+        pct = _target_pct("set", level, 0)
+        if pct is None:
             return "Sorry, I didn't catch the volume level."
         arg = f"{pct}%"
     elif direction in ("up", "down"):
@@ -392,7 +454,7 @@ def set_volume(direction, level=None):
         return "Sorry, I couldn't change the volume."
     print(f"[tool] set_volume -> PCM {arg}", flush=True)
     if direction == "set":
-        return f"Okay, volume set to {pct} percent."
+        return f"Okay, volume set to {arg[:-1]} percent."
     return "Okay, turned it " + ("up." if direction == "up" else "down.")
 
 

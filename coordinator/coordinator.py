@@ -50,6 +50,34 @@ LLM_LABEL = "CLAUDE" if (_CFG.get("llm", {}).get("backend") or "claude").strip()
 RATE = 16000
 FRAME = 1280  # 80 ms @ 16 kHz
 
+# A wedged USB mic (the PS3 Eye's clock hangs — the kernel then logs "current
+# rate ... is different from the runtime rate") still opens fine and reports its
+# channel count, but never delivers usable audio, so the wakeword can never fire
+# while the loop still looks healthy. It shows up two ways:
+#   * reads stall — no frames arrive at all (the common one; caught by the
+#     watchdog thread below, since the reading thread is blocked and can't check
+#     the clock itself), or
+#   * reads return frames of exactly zero (a working mic always has a noise
+#     floor, so an unbroken run of all-zero frames means it's dead).
+# Only a physical replug clears it — USB unbind/rebind and USBDEVFS_RESET do not
+# — so the goal here is to say so loudly rather than pretend to be listening.
+DEAD_MIC_SECONDS = 30
+DEAD_MIC_FRAMES = int(DEAD_MIC_SECONDS * RATE / FRAME)
+_last_frame_at = [time.time()]   # updated by the read loop; read by the watchdog
+
+
+def _mic_watchdog():
+    """Warn if no mic frame has arrived for DEAD_MIC_SECONDS (a stalled mic)."""
+    while True:
+        time.sleep(5)
+        stalled = time.time() - _last_frame_at[0]
+        if stalled >= DEAD_MIC_SECONDS:
+            log.error("MIC  : no audio for %.0fs — the mic is wedged (check dmesg for "
+                      "'current rate'); unplug and replug it", stalled)
+            print(f"\n{RED}mic delivered no audio for {stalled:.0f}s — unplug and replug it{RESET}",
+                  flush=True)
+            _last_frame_at[0] = time.time()   # re-warn every DEAD_MIC_SECONDS, not every 5s
+
 # Serialize speaker use so a firing timer never overlaps reply/beep playback.
 PLAYBACK_LOCK = threading.Lock()
 # Active timers: each is {"deadline": epoch_secs, "timer": threading.Timer}. The
@@ -475,6 +503,7 @@ def _rms(frame):
 def read_mono(stream, channels):
     """Read one FRAME; if the device is multi-channel, keep channel 0 (mono)."""
     data, _ = stream.read(FRAME)
+    _last_frame_at[0] = time.time()      # liveness for the mic watchdog
     a = np.frombuffer(bytes(data), dtype=np.int16)
     if channels > 1:
         a = a.reshape(-1, channels)[:, 0]
@@ -584,10 +613,32 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     stream, channels = _open_mic(sd, input_device, refresh=False)
     print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
           f"(mic {channels}ch; Ctrl+C to quit)")
+    _last_frame_at[0] = time.time()
+    threading.Thread(target=_mic_watchdog, daemon=True).start()
+    silent_frames = 0       # consecutive all-zero frames (see DEAD_MIC_FRAMES)
+    tried_reopen = False
     try:
         while True:
             try:
                 frame = read_mono(stream, channels)
+                if not frame.any():          # dead-mic watchdog
+                    silent_frames += 1
+                    if silent_frames >= DEAD_MIC_FRAMES:
+                        silent_frames = 0
+                        log.error("MIC  : no signal for %ds (every sample zero) — the mic is "
+                                  "wedged; unplug and replug it", DEAD_MIC_SECONDS)
+                        print(f"\n{RED}mic is delivering silence — unplug and replug it{RESET}",
+                              flush=True)
+                        if not tried_reopen:  # one reopen in case it's recoverable
+                            tried_reopen = True
+                            try:
+                                stream.stop(); stream.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            stream, channels = _open_mic(sd, input_device)
+                    continue
+                silent_frames = 0
+                tried_reopen = False
                 if _score_of(model.predict(frame), model_name) < threshold:
                     continue
                 t_wake = time.perf_counter()

@@ -846,8 +846,10 @@ def build_claude_system(base, tools):
     names = ", ".join(t["function"]["name"] for t in (tools or []))
     if not names:
         return base
-    web = " You can also search the web when a question needs current information." \
-        if CLAUDE_AGENT_MODE != "off" else ""
+    web = (" You can also search the web when a question needs current information."
+           " When you do, answer in your own words only — never read out or list sources,"
+           " citations, links, or web addresses; the reply is spoken aloud."
+           ) if CLAUDE_AGENT_MODE != "off" else ""
     return (base + "\n\nYou have tools (the aven tools: " + names + ") to control the"
             " user's home and answer questions. Use them to carry out what the user asks,"
             " calling several in one turn when several things are asked at once, then reply"
@@ -1076,6 +1078,7 @@ class ClaudeSession:
                         if ctrl:
                             yield ("control", ctrl)
         spoken = (final if (final and final.strip()) else last_text).strip()
+        spoken = _strip_sources(spoken)   # web search loves to append a Sources: block
         if spoken:
             yield ("text", spoken)
 

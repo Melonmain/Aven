@@ -115,10 +115,20 @@ def call_tool(name, args):
 
 
 def _tool_specs():
-    """MCP tool list, derived from llm_server's OpenAI-style specs."""
+    """MCP tool list, derived from llm_server's OpenAI-style specs.
+
+    In web/yolo mode the CLI already gives the model native WebSearch, so we drop
+    our own search_web (which spawns a whole nested Claude — slow and redundant,
+    and let both fire on one 'search the web' request). It stays only in 'off'
+    mode, where it's the only way to reach the internet."""
+    drop = set()
+    if A.CLAUDE_AGENT_MODE in ("web", "yolo"):
+        drop.add("search_web")
     specs = []
     for t in A.TOOLS or []:
         fn = t["function"]
+        if fn["name"] in drop:
+            continue
         specs.append({"name": fn["name"], "description": fn.get("description", ""),
                       "inputSchema": fn.get("parameters") or {"type": "object", "properties": {}}})
     return specs

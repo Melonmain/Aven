@@ -146,6 +146,16 @@ def build_tools():
         "description": "Get today's date.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }})
+    tools.append({"type": "function", "function": {
+        "name": "say",
+        "description": "Speak a line of text to the user. ONLY use this inside a "
+                       "multi-action array when you also want to say something alongside "
+                       "the actions (e.g. tell a joke while turning on a light). For a "
+                       "plain spoken answer with no actions, just reply with text instead.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "what to say, in plain spoken words"}},
+            "required": ["text"]},
+    }})
     if VOLUME_ENABLED or SPOTIFY_ENABLED:
         tools.append({"type": "function", "function": {
             "name": "set_volume",
@@ -626,6 +636,10 @@ def handle_tool_calls(calls):
             today = time.strftime("%A, %B %-d, %Y")
             print(f"[tool] get_date -> {today}", flush=True)
             parts.append(f"Today is {today}.")
+        elif name == "say":
+            text = (args.get("text") or "").strip()
+            if text:
+                parts.append(text)
         elif name == "set_volume":
             parts.append(set_volume(args.get("direction"), args.get("level")))
         elif name == "play_music":
@@ -826,13 +840,14 @@ def build_claude_system(base, tools):
     else:
         native = ("You have NO callable tools or functions — never emit a tool call. ")
     return (base + "\n\n" + native + "Separately, the following device actions are NOT"
-            " built-in tools — to perform one, your ENTIRE reply must be JSON and nothing"
-            ' else: {"tool": "<name>", "arguments": {...}} (output as plain text, do not'
-            " invoke it). To do SEVERAL device actions at once (e.g. lights and music),"
-            ' output a JSON array of them: [{"tool": "...", "arguments": {...}}, {"tool":'
-            ' "...", "arguments": {...}}].\nDevice actions:\n' + doc +
-            "\nWhen you've used a built-in tool or no device action is needed, just answer"
-            " in one or two short spoken sentences.")
+            " built-in tools. To perform one, your reply must be the JSON directive and"
+            " NOTHING else — no preamble, no explanation, no words before or after, no"
+            ' markdown or code fences. One action: {"tool": "<name>", "arguments": {...}}.'
+            " Several at once (e.g. lights and music, or an action plus something to say"
+            ' via the say action): a JSON array [{"tool": "...", "arguments": {...}}, ...].'
+            " The very first character of such a reply must be { or [.\nDevice actions:\n"
+            + doc + "\nWhen you've used a built-in tool or no device action is needed, just"
+            " answer in one or two short spoken sentences.")
 
 
 def _serialize_for_claude(messages):
@@ -853,12 +868,22 @@ def _serialize_for_claude(messages):
     return "\n".join(lines)
 
 
+def _strip_code_fence(s):
+    """Drop a ```/```json markdown fence the model sometimes wraps JSON in."""
+    s = s.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s.strip())
+    return s.strip()
+
+
 def _parse_claude_tool(text):
     """Parse a JSON tool directive into a list of calls, or None.
 
     Accepts a single object {"tool":..,"arguments":..} or a JSON array of them
-    (so several device actions can be requested in one reply, e.g. lights + music)."""
-    s = text.strip()
+    (so several device actions can be requested in one reply, e.g. lights + music),
+    tolerating a markdown code fence the model may wrap it in."""
+    s = _strip_code_fence(text)
     if not (s and s[0] in "{[" and '"tool"' in s):
         return None
     try:
@@ -930,7 +955,7 @@ def stream_claude(messages, tools=None):
                 if not stripped:
                     continue
                 # A tool directive (only when tools are offered) starts with '{'.
-                mode = "tool" if (tools and stripped[0] in "{[") else "text"
+                mode = "tool" if (tools and stripped[0] in "{[`") else "text"
             if mode == "text":
                 yield ("text", piece)
     finally:
@@ -944,7 +969,7 @@ def stream_claude(messages, tools=None):
     # message at once) — decide from the final assistant text instead.
     if mode is None and whole.strip():
         buf = whole
-        mode = "tool" if (tools and whole.lstrip()[0] in "{[") else "text"
+        mode = "tool" if (tools and whole.lstrip()[0] in "{[`") else "text"
         if mode == "text":
             yield ("text", whole)
     if mode == "tool":
@@ -1025,12 +1050,12 @@ class ClaudeSession:
                 stripped = buf.lstrip()
                 if not stripped:
                     continue
-                mode = "tool" if (detect_tool and stripped[0] in "{[") else "text"
+                mode = "tool" if (detect_tool and stripped[0] in "{[`") else "text"
             if mode == "text":
                 yield ("text", piece)
         if mode is None and whole.strip():
             buf = whole
-            mode = "tool" if (detect_tool and whole.lstrip()[0] in "{[") else "text"
+            mode = "tool" if (detect_tool and whole.lstrip()[0] in "{[`") else "text"
             if mode == "text":
                 yield ("text", whole)
         if mode == "tool":
@@ -1107,8 +1132,9 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
         if use_claude:
             results = "; ".join(f"{c.get('name')} returned: {run_tool(c)}" for c in data)
             return claude_session.send(
-                f"Tool results — {results}\nUsing only this, answer my question now"
-                " in one or two short spoken sentences.", detect_tool=False)
+                f"Tool results — {results}\nUsing only this, answer my question now in one"
+                " or two short spoken sentences. Give only the information asked for; do not"
+                " restate or mention any device actions.", detect_tool=False)
         calls = data
         history.append({
             "role": "assistant", "content": None,
@@ -1147,32 +1173,40 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
                     for clause in clauses:
                         events.put(("clause", clause))
                 elif kind == "tool":
-                    if any(c.get("name") in DATA_TOOLS for c in val):
-                        for kind2, val2 in data_followup(val):
+                    # A batch may mix action tools (set_light/set_timer/say — fixed
+                    # confirmations + control events) and data tools (weather/web —
+                    # the model phrases the result). Run both so a mixed request
+                    # ("turn on the light and what's the weather") works fully.
+                    action_calls = [c for c in val if c.get("name") not in DATA_TOOLS]
+                    data_calls = [c for c in val if c.get("name") in DATA_TOOLS]
+                    # 1. Actions first: complete confirmation string(s) + control events.
+                    if action_calls:
+                        areply, controls = handle_tool_calls(action_calls)
+                        for ctrl in controls:
+                            events.put(("control", ctrl))
+                        if areply:
+                            piece = areply + (" " if data_calls else "")  # separate from data answer
+                            collected.append(piece)
+                            events.put(("llm", piece))
+                            buf += areply + "\n"          # \n forces a full flush
+                            clauses, buf = extract_clauses(buf)
+                            for clause in clauses:
+                                events.put(("clause", clause))
+                    # 2. Data tools: the model streams the spoken answer.
+                    if data_calls:
+                        for kind2, val2 in data_followup(data_calls):
                             if kind2 == "text":
                                 collected.append(val2)
                                 events.put(("llm", val2))
-                                buf += val2
+                                buf += val2               # raw token fragments, no spaces
                                 clauses, buf = extract_clauses(buf)
                                 for clause in clauses:
                                     events.put(("clause", clause))
-                        tail = buf.strip()
-                        if tail:
-                            events.put(("clause", tail))
-                        tool_reply = "".join(collected)
-                    else:
-                        # Action tools (set_light/set_timer): fixed confirmation,
-                        # plus any control events for the client (e.g. a timer).
-                        tool_reply, controls = handle_tool_calls(val)
-                        for ctrl in controls:
-                            events.put(("control", ctrl))
-                        events.put(("llm", tool_reply))
-                        clauses, tail = extract_clauses(tool_reply + "\n")
-                        for clause in clauses:
-                            events.put(("clause", clause))
-                        if tail.strip():
-                            events.put(("clause", tail.strip()))
-                        collected = [tool_reply]
+                    tail = buf.strip()
+                    if tail:
+                        events.put(("clause", tail))
+                        buf = ""
+                    tool_reply = "".join(collected)
             if tool_reply is None:
                 tail = buf.strip()
                 if tail:

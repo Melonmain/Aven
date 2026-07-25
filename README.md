@@ -312,6 +312,13 @@ never depend on a 3B model deciding to call a tool.
 | *"set a timer for 5 minutes"* | `set_timer` | Confirms, then the **coordinator** schedules it locally; beeps + "your timer is finished" when it fires. |
 | *"cancel the timer"* | `cancel_timer` | Cancels the running timer(s); the coordinator (which owns the timer) speaks the result. |
 | *"how much time is left?"* | `timer_time_left` | Speaks the remaining time on the soonest timer. |
+| *"turn on the light and tell me a joke"* | `say` | Speaks custom text; used inside a multi-action batch so the model can act **and** say something. |
+
+Several actions in one utterance work together — including mixed action + info,
+e.g. *"turn off the bed light and what's the weather"* runs the light **and**
+speaks the forecast. The model emits a JSON array of directives; `llm_server`
+runs the action tools (fixed confirmations + control events) and feeds the data
+tools' results back so it phrases one combined spoken reply.
 | *"what time is it?"* | `get_time` | Board's local time, spoken directly. |
 | *"what's the date today?"* | `get_date` | Today's date, spoken directly. |
 | *"who won the 2025 Nobel Prize in Physics?"* | `search_web` | Live internet research via a dedicated Claude web-search call (reuses the host's Claude auth, no API key); the answer is fed back so the model phrases the reply. |

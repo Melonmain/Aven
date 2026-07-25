@@ -826,9 +826,11 @@ def build_claude_system(base, tools):
     else:
         native = ("You have NO callable tools or functions — never emit a tool call. ")
     return (base + "\n\n" + native + "Separately, the following device actions are NOT"
-            " built-in tools — to perform one, your ENTIRE reply must be a single line of"
-            ' JSON and nothing else: {"tool": "<name>", "arguments": {...}} (output as plain'
-            " text, do not invoke it).\nDevice actions:\n" + doc +
+            " built-in tools — to perform one, your ENTIRE reply must be JSON and nothing"
+            ' else: {"tool": "<name>", "arguments": {...}} (output as plain text, do not'
+            " invoke it). To do SEVERAL device actions at once (e.g. lights and music),"
+            ' output a JSON array of them: [{"tool": "...", "arguments": {...}}, {"tool":'
+            ' "...", "arguments": {...}}].\nDevice actions:\n' + doc +
             "\nWhen you've used a built-in tool or no device action is needed, just answer"
             " in one or two short spoken sentences.")
 
@@ -852,18 +854,24 @@ def _serialize_for_claude(messages):
 
 
 def _parse_claude_tool(text):
-    """If the reply is a {"tool":...} JSON directive, return [call]; else None."""
+    """Parse a JSON tool directive into a list of calls, or None.
+
+    Accepts a single object {"tool":..,"arguments":..} or a JSON array of them
+    (so several device actions can be requested in one reply, e.g. lights + music)."""
     s = text.strip()
-    if not (s.startswith("{") and '"tool"' in s):
+    if not (s and s[0] in "{[" and '"tool"' in s):
         return None
     try:
         obj = json.loads(s)
     except json.JSONDecodeError:
         return None
-    name = obj.get("tool")
-    if not name:
-        return None
-    return [{"id": "call_0", "name": name, "arguments": obj.get("arguments") or {}}]
+    items = obj if isinstance(obj, list) else [obj]
+    calls = []
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and it.get("tool"):
+            calls.append({"id": f"call_{i}", "name": it["tool"],
+                          "arguments": it.get("arguments") or {}})
+    return calls or None
 
 
 def stream_claude(messages, tools=None):
@@ -922,7 +930,7 @@ def stream_claude(messages, tools=None):
                 if not stripped:
                     continue
                 # A tool directive (only when tools are offered) starts with '{'.
-                mode = "tool" if (tools and stripped[0] == "{") else "text"
+                mode = "tool" if (tools and stripped[0] in "{[") else "text"
             if mode == "text":
                 yield ("text", piece)
     finally:
@@ -936,7 +944,7 @@ def stream_claude(messages, tools=None):
     # message at once) — decide from the final assistant text instead.
     if mode is None and whole.strip():
         buf = whole
-        mode = "tool" if (tools and whole.lstrip()[0] == "{") else "text"
+        mode = "tool" if (tools and whole.lstrip()[0] in "{[") else "text"
         if mode == "text":
             yield ("text", whole)
     if mode == "tool":
@@ -1017,12 +1025,12 @@ class ClaudeSession:
                 stripped = buf.lstrip()
                 if not stripped:
                     continue
-                mode = "tool" if (detect_tool and stripped[0] == "{") else "text"
+                mode = "tool" if (detect_tool and stripped[0] in "{[") else "text"
             if mode == "text":
                 yield ("text", piece)
         if mode is None and whole.strip():
             buf = whole
-            mode = "tool" if (detect_tool and whole.lstrip()[0] == "{") else "text"
+            mode = "tool" if (detect_tool and whole.lstrip()[0] in "{[") else "text"
             if mode == "text":
                 yield ("text", whole)
         if mode == "tool":

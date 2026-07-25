@@ -63,6 +63,21 @@ CLAUDE_MODEL = _CFG["llm"].get("claude_model")   # None -> the CLI's default mod
 # all permission prompts skipped. See config.yaml for the risk note.
 CLAUDE_AGENT_MODE = (_CFG["llm"].get("claude_agent_mode") or "off").strip().lower()
 
+# MCP: Aven's own tools are exposed to the CLI as NATIVE tools via aven_mcp.py, so
+# the brain calls them as structured tool calls (reliable) instead of the old
+# text-JSON directive protocol. The config points the CLI at that server, run
+# with this same interpreter (so it can import llm_server + our deps).
+_MCP_SERVER = str(pathlib.Path(__file__).resolve().parent / "aven_mcp.py")
+_MCP_CONFIG = str(pathlib.Path(__file__).resolve().parent / ".mcp-config.json")
+
+
+def _write_mcp_config():
+    try:
+        cfg = {"mcpServers": {"aven": {"command": sys.executable, "args": [_MCP_SERVER]}}}
+        pathlib.Path(_MCP_CONFIG).write_text(json.dumps(cfg))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[mcp] could not write config: {exc}", flush=True)
+
 # --- Tools (Tasmota plugs + weather) ----------------------------------------
 LIGHTS = _CFG.get("lights", {}) or {}
 WEATHER = _CFG.get("weather", {}) or {}
@@ -790,19 +805,23 @@ _CLAUDE_BLOCKED_TOOLS = ["Bash", "Read", "Edit", "Write", "WebFetch", "WebSearch
 
 
 def _claude_agent_flags():
-    """CLI flags for the brain's native tools + permission prompts, per
-    CLAUDE_AGENT_MODE. In 'off' we also strip the CLI's dynamic system-prompt
-    sections (cwd/tools/date) to keep only our prompt; the agent modes keep them
-    so the model actually knows it has web/other tools available."""
+    """CLI flags: load Aven's MCP tools and gate the brain's OTHER native tools
+    per CLAUDE_AGENT_MODE. Aven's own tools (mcp__aven) plus ToolSearch — needed
+    to load them, since MCP tools are deferred in this CLI — are always allowed;
+    the mode only controls web/shell access:
+      off  - Aven tools only; web/shell blocked
+      web  - Aven tools + read-only WebSearch/WebFetch
+      yolo - everything incl. Bash/file edits, no permission prompts."""
+    base = ["--mcp-config", _MCP_CONFIG, "--strict-mcp-config"]
     if CLAUDE_AGENT_MODE == "yolo":
-        # Full autonomy: every native tool (Bash, file edits, web), no prompts.
-        return ["--dangerously-skip-permissions"]
+        return base + ["--dangerously-skip-permissions"]
+    allow = ["mcp__aven", "ToolSearch"]
+    block = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Task", "NotebookEdit"]
     if CLAUDE_AGENT_MODE == "web":
-        # Read-only internet only; everything else stays blocked.
-        blocked = [t for t in _CLAUDE_BLOCKED_TOOLS if t not in ("WebSearch", "WebFetch")]
-        return ["--allowedTools", "WebSearch", "WebFetch", "--disallowedTools", *blocked]
-    # off (default): sandboxed — no native tools, only our JSON-directive tools.
-    return ["--exclude-dynamic-system-prompt-sections", "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+        return base + ["--allowedTools", *allow, "WebSearch", "WebFetch",
+                       "--disallowedTools", *block]
+    return base + ["--allowedTools", *allow,
+                   "--disallowedTools", *block, "WebSearch", "WebFetch"]
 
 
 def _claude_tool_doc(tools):
@@ -818,36 +837,39 @@ def _claude_tool_doc(tools):
 
 
 def build_claude_system(base, tools):
-    """System prompt for the Claude backend: base prompt + JSON tool protocol."""
+    """System prompt for the Claude backend. Aven's tools are NATIVE MCP tools
+    now (mcp__aven__*), so we just tell the model to use them — no text protocol."""
     # The CLI injects the operator's account identity (email) into context; a
     # voice assistant shouldn't volunteer it.
     base = base + (" Never mention or use the operator's email address or other"
                    " host-account details, even if asked.")
-    doc = _claude_tool_doc(tools)
-    if not doc:
+    names = ", ".join(t["function"]["name"] for t in (tools or []))
+    if not names:
         return base
-    # Agent modes give the model real native tools; it must still use the JSON
-    # directive protocol for the hardware actions below (which have no native
-    # equivalent). 'off' has no native tools at all.
-    if CLAUDE_AGENT_MODE == "yolo":
-        native = ("You can use your built-in tools directly — web search, fetching pages,"
-                  " running shell commands, and reading or editing files on this machine —"
-                  " whenever they help you answer or carry out a request. Keep spoken"
-                  " replies short. ")
-    elif CLAUDE_AGENT_MODE == "web":
-        native = ("You can use your built-in web search and page-fetch tools directly to"
-                  " look things up whenever that helps. Keep spoken replies short. ")
-    else:
-        native = ("You have NO callable tools or functions — never emit a tool call. ")
-    return (base + "\n\n" + native + "Separately, the following device actions are NOT"
-            " built-in tools. To perform one, your reply must be the JSON directive and"
-            " NOTHING else — no preamble, no explanation, no words before or after, no"
-            ' markdown or code fences. One action: {"tool": "<name>", "arguments": {...}}.'
-            " Several at once (e.g. lights and music, or an action plus something to say"
-            ' via the say action): a JSON array [{"tool": "...", "arguments": {...}}, ...].'
-            " The very first character of such a reply must be { or [.\nDevice actions:\n"
-            + doc + "\nWhen you've used a built-in tool or no device action is needed, just"
-            " answer in one or two short spoken sentences.")
+    web = " You can also search the web when a question needs current information." \
+        if CLAUDE_AGENT_MODE != "off" else ""
+    return (base + "\n\nYou have tools (the aven tools: " + names + ") to control the"
+            " user's home and answer questions. Use them to carry out what the user asks,"
+            " calling several in one turn when several things are asked at once, then reply"
+            " in one or two short spoken sentences." + web + " Never say you can't control"
+            " devices or check things — use the tools.")
+
+
+def _timer_control(name, inp):
+    """Map an aven timer MCP tool call to the coordinator control event that
+    actually schedules/cancels the firing (the beep). timer_time_left needs no
+    control — the MCP server answers it from shared state."""
+    inp = inp or {}
+    if name == "mcp__aven__set_timer":
+        try:
+            return {"type": "timer", "seconds": max(1, int(round(float(inp.get("minutes")) * 60)))}
+        except (TypeError, ValueError):
+            return None
+    if name == "mcp__aven__cancel_timer":
+        # The model already speaks the confirmation (from the MCP result), so the
+        # coordinator should cancel the firing silently.
+        return {"type": "cancel_timer", "silent": True}
+    return None
 
 
 def _serialize_for_claude(messages):
@@ -1005,7 +1027,10 @@ class ClaudeSession:
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
     def send(self, text, detect_tool=True):
-        """Send one user message; yield ('text', tok) / ('tool', [calls])."""
+        """Send one user message; yield ('text', tok) as the spoken reply streams,
+        and ('control', ev) when the model calls a timer tool (so the coordinator,
+        which owns the speaker, schedules/cancels the firing). Aven's other tools
+        are executed by the MCP server; the model phrases the result itself."""
         try:
             self._ensure()
             msg = {"type": "user", "message": {"role": "user",
@@ -1018,7 +1043,14 @@ class ClaudeSession:
             yield ("text", "Sorry, I couldn't reach Claude.")
             return
 
-        buf, whole, mode = "", "", None
+        # We do NOT stream intermediate text: while using tools the model narrates
+        # ("Let me search for the weather tool…") and that would be spoken. Only the
+        # FINAL answer (the 'result' event, or the last assistant text) is spoken.
+        # Timer tool calls are surfaced live as control events so the coordinator
+        # schedules the firing during the turn.
+        seen_tools = set()
+        last_text = ""
+        final = None
         for line in self._proc.stdout:
             line = line.strip()
             if not line:
@@ -1028,39 +1060,24 @@ class ClaudeSession:
             except json.JSONDecodeError:
                 continue
             etype = ev.get("type")
-            if etype == "result":          # end of this turn
+            if etype == "result":
+                if not ev.get("is_error"):
+                    final = ev.get("result")
                 break
-            if etype == "assistant":       # full message — fallback if no deltas
-                whole = "".join(b.get("text", "") for b in ev.get("message", {}).get("content", [])
-                                if b.get("type") == "text")
-                continue
-            if etype != "stream_event":
-                continue
-            inner = ev.get("event") or {}
-            if inner.get("type") != "content_block_delta":
-                continue
-            delta = inner.get("delta") or {}
-            if delta.get("type") != "text_delta":   # ignore thinking deltas
-                continue
-            piece = delta.get("text") or ""
-            if not piece:
-                continue
-            buf += piece
-            if mode is None:
-                stripped = buf.lstrip()
-                if not stripped:
-                    continue
-                mode = "tool" if (detect_tool and stripped[0] in "{[`") else "text"
-            if mode == "text":
-                yield ("text", piece)
-        if mode is None and whole.strip():
-            buf = whole
-            mode = "tool" if (detect_tool and whole.lstrip()[0] in "{[`") else "text"
-            if mode == "text":
-                yield ("text", whole)
-        if mode == "tool":
-            calls = _parse_claude_tool(buf)
-            yield ("tool", calls) if calls else ("text", buf)
+            if etype == "assistant":
+                blocks = ev.get("message", {}).get("content", [])
+                text_here = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+                if text_here.strip():
+                    last_text = text_here
+                for b in blocks:            # timer tool calls -> control events
+                    if b.get("type") == "tool_use" and b.get("id") not in seen_tools:
+                        seen_tools.add(b.get("id"))
+                        ctrl = _timer_control(b.get("name"), b.get("input"))
+                        if ctrl:
+                            yield ("control", ctrl)
+        spoken = (final if (final and final.strip()) else last_text).strip()
+        if spoken:
+            yield ("text", spoken)
 
     def reset(self):
         """Drop the conversation (used on 'clear') by restarting the process."""
@@ -1172,6 +1189,10 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
                     clauses, buf = extract_clauses(buf)
                     for clause in clauses:
                         events.put(("clause", clause))
+                elif kind == "control":
+                    # Claude/MCP path: a timer tool call -> forward the schedule/
+                    # cancel event to the coordinator (it owns the speaker).
+                    events.put(("control", val))
                 elif kind == "tool":
                     # A batch may mix action tools (set_light/set_timer/say — fixed
                     # confirmations + control events) and data tools (weather/web —
@@ -1365,6 +1386,7 @@ def main():
     if BACKEND == "claude":
         model = CLAUDE_MODEL or "cli default"
         backend_desc = f"claude CLI ({CLAUDE_BIN})"
+        _write_mcp_config()            # Aven's tools -> native MCP tools for the CLI
         if CLAUDE_AGENT_MODE == "yolo":
             print("\033[31m⚠ claude_agent_mode=yolo: the brain can run ANY tool "
                   "(incl. Bash) on this host with no prompts.\033[0m", flush=True)

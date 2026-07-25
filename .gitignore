@@ -21,3 +21,5 @@ test_output.wav
 
 # Piper voices (downloaded by TTSV3/setup_piper.sh; large)
 TTSV3/voices/
+LLM/.mcp-config.json
+LLM/.timers.json

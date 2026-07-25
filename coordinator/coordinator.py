@@ -292,7 +292,11 @@ def _stream_reply(ws, text, player):
             elif etype == "timer":
                 schedule_timer(int(event.get("seconds", 0)), player)
             elif etype == "cancel_timer":
-                pending_say = cancel_timers()
+                # Always cancel the local firing; only speak if the server didn't
+                # (the claude/MCP path speaks the confirmation itself -> silent).
+                said = cancel_timers()
+                if not event.get("silent"):
+                    pending_say = said
             elif etype == "query_timer":
                 pending_say = timer_time_left()
             elif etype == "error":

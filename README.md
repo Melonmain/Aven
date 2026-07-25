@@ -300,10 +300,16 @@ seconds (default 60) between two wake-words, it starts a fresh conversation.
 
 ### Tools (what it can act on)
 
-The model is given a small set of tools; `llm_server` executes them and speaks a
-result. For brittle, must-work commands there are also **deterministic
-shortcuts** that run the action *before* the model ever sees the text — so they
-never depend on a 3B model deciding to call a tool.
+With the **claude** backend, Aven's tools are exposed to the model as **native
+MCP tools** via a small stdio server ([`LLM/aven_mcp.py`](LLM/aven_mcp.py),
+loaded with `--mcp-config`), so the brain calls them as structured tool calls
+instead of emitting JSON as text — no more mangled directives or spoken JSON, and
+several tools (mixed action + info) run naturally in one turn. `llm_server`
+watches the tool-call stream to forward timer scheduling to the coordinator (only
+it has the speaker). The **rkllama** backend uses the same tool specs as ordinary
+OpenAI tool-calls. Either way, brittle must-work commands also have
+**deterministic shortcuts** that run *before* the model — instant, and immune to
+the model's tool choice.
 
 | Say | Tool | What happens |
 |-----|------|--------------|

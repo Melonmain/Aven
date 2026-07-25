@@ -248,18 +248,21 @@ def transcribe(stt_url, pcm_bytes, rate):
     return text
 
 
-def _stream_reply(ws, text, player):
+def _stream_reply(ws, text, player, stop_event=None):
     """Send one prompt on an open LLM ws; stream transcript + play audio.
 
     Logs what the LLM/TTS node streams back (transcript, audio_start params, PCM
     chunk/byte counts) and the latency of each milestone. Lets ConnectionClosed
-    propagate so a persistent caller can reconnect.
+    propagate so a persistent caller can reconnect. If `stop_event` fires (the
+    user said the wake word again — barge-in), playback stops early and the
+    result is flagged interrupted so the caller can drop the now-stale ws.
     """
     t0 = time.perf_counter()
     ms = lambda t: (t - t0) * 1000
     first_tok = first_audio = done_t = None
     chunks = nbytes = 0
     rate = None
+    interrupted = False
 
     ws.send(json.dumps({"text": text}))
     log.info("%-4s : sent prompt (%d chars)", LLM_LABEL, len(text))
@@ -267,7 +270,17 @@ def _stream_reply(ws, text, player):
     sys.stdout.flush()
     pending_say = None                        # timer answer the coordinator speaks
     with PLAYBACK_LOCK:                       # exclusive speaker for this reply
-        for message in ws:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                interrupted = True
+                log.info("%-4s : reply interrupted (barge-in)", LLM_LABEL)
+                break
+            try:
+                # Short timeout so a barge-in is caught even during a generation
+                # gap (no messages yet); ConnectionClosed propagates for reconnect.
+                message = ws.recv(timeout=0.25)
+            except TimeoutError:
+                continue
             if isinstance(message, (bytes, bytearray)):
                 if first_audio is None:
                     first_audio = time.perf_counter()
@@ -308,7 +321,7 @@ def _stream_reply(ws, text, player):
         player.end()                          # release/re-probe speaker for next turn
         # cancel_timer / time-left replies are spoken by us (the timer is ours),
         # since the server has no view of the local timer state.
-        if pending_say:
+        if pending_say and not interrupted:
             tts_say(pending_say, player)
     print()
 
@@ -317,7 +330,8 @@ def _stream_reply(ws, text, player):
     log.info("%s/TTS done @ %.0f ms (first_token %.0f ms, first_audio %.0f ms)", LLM_LABEL,
              ms(done_t) if done_t else 0, ms(first_tok) if first_tok else 0,
              ms(first_audio) if first_audio else 0)
-    return {"total_s": (done_t - t0) if done_t else 0.0, "audio_s": audio_s}
+    return {"total_s": (done_t - t0) if done_t else 0.0, "audio_s": audio_s,
+            "interrupted": interrupted}
 
 
 def converse(llm_url, text, player):
@@ -391,14 +405,20 @@ class LLMSession:
         """Resume what pause_music() paused."""
         return self._command("resume_music", "resumed")
 
-    def turn(self, text, player):
+    def turn(self, text, player, stop_event=None):
         from websockets.exceptions import ConnectionClosed
         with self._lock:
             try:
-                return _stream_reply(self._ensure(), text, player)
+                result = _stream_reply(self._ensure(), text, player, stop_event)
             except (ConnectionClosed, OSError):
                 self._reset()   # reconnect (fresh history) on the next turn
                 raise
+            # A barged-in reply leaves unread data on the ws; drop it so the next
+            # turn starts clean (loses server-side history, which is fine — the
+            # user is starting a new request).
+            if result.get("interrupted"):
+                self._reset()
+            return result
 
     def close(self):
         self._reset()
@@ -621,6 +641,34 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     threading.Thread(target=_mic_watchdog, daemon=True).start()
     silent_frames = 0       # consecutive all-zero frames (see DEAD_MIC_FRAMES)
     tried_reopen = False
+
+    # The reply (LLM + TTS playback) runs in a background thread so the wake loop
+    # keeps listening while Aven is talking. Saying the wake word again barges in:
+    # it stops the current reply immediately and starts a new turn.
+    reply_stop = threading.Event()
+    reply_thread = [None]
+
+    def _stop_reply():
+        t = reply_thread[0]
+        if t is not None and t.is_alive():
+            reply_stop.set()
+            t.join(timeout=4)          # break its playback loop; free speaker + ws
+        reply_stop.clear()
+
+    def _start_reply(prompt):
+        def run():
+            try:
+                session.turn(prompt, player, reply_stop)
+            except Exception:          # noqa: BLE001 — reconnect and retry once
+                try:
+                    session.turn(prompt, player, reply_stop)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("LLM error: %s", exc)
+                    print(f"{RED}LLM error: {exc}{RESET}")
+        reply_stop.clear()
+        reply_thread[0] = threading.Thread(target=run, daemon=True)
+        reply_thread[0].start()
+
     try:
         while True:
             try:
@@ -655,6 +703,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 log.info("WAKE : '%s' detected%s", model_name,
                          "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
+                _stop_reply()   # barge-in: kill any reply still playing/generating
                 # Duck Spotify while we capture, so it doesn't bleed into the
                 # recording. Backgrounded so the beep isn't delayed by the API
                 # round-trip; the resume waits for this to settle first.
@@ -680,19 +729,12 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                     log.warning("STT error: %s", exc)
                     print(f"{RED}STT error: {exc}{RESET}"); continue
                 print(f"{CYAN}You:{RESET} {text}")
-                if text.strip():
-                    try:
-                        session.turn(text, player)
-                    except Exception:  # noqa: BLE001 — reconnect and retry once
-                        try:
-                            session.turn(text, player)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("LLM error: %s", exc)
-                            print(f"{RED}LLM error: {exc}{RESET}")
-                log.info("TURN : total %.2fs (wake -> reply done)",
-                         time.perf_counter() - t_wake)
                 if hasattr(model, "reset"):
-                    model.reset()   # avoid re-triggering on the same audio
+                    model.reset()   # clear the wake buffer so we don't self-trigger
+                if text.strip():
+                    _start_reply(text)   # play in the background; keep listening
+                log.info("TURN : %.2fs (wake -> prompt sent; reply plays in background)",
+                         time.perf_counter() - t_wake)
                 print(f"{GREEN}listening…{RESET}", flush=True)
             except sd.PortAudioError as exc:    # mic unplugged mid-read
                 log.warning("MIC  : I/O error (%s) — reconnecting…", exc)

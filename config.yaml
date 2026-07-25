@@ -68,6 +68,15 @@ llm:
   # Optional model for the claude backend (e.g. claude-haiku-4-5 for snappier
   # voice replies). null = the CLI's default model.
   claude_model: claude-haiku-4-5
+  # How much the Claude brain may do on its own — controls the CLI's NATIVE tools
+  # and permission prompts (separate from Aven's own tools like lights/timers):
+  #   off  - sandboxed: no native tools (lowest latency, safest)
+  #   web  - read-only internet only: WebSearch + WebFetch (recommended)
+  #   yolo - full autonomy: EVERY tool incl. Bash and file edits on this host,
+  #          with ALL permission prompts skipped. Powerful but risky here — this
+  #          is voice-triggered and STT can mishear, so a garbled command could
+  #          run anything on the board. Use deliberately.
+  claude_agent_mode: yolo
   # Local model name as known to rkllama (the trailing segment of the pull path).
   model: qwen2.5-3b
   # Ping rkllama every N minutes so it never unloads the model (rkllama drops it

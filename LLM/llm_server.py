@@ -57,6 +57,11 @@ KEEPALIVE_MIN = _CFG["llm"].get("keepalive_minutes", 0)
 BACKEND = (_CFG["llm"].get("backend") or "claude").strip().lower()
 CLAUDE_BIN = _CFG["llm"].get("claude_bin") or shutil.which("claude") or "claude"
 CLAUDE_MODEL = _CFG["llm"].get("claude_model")   # None -> the CLI's default model
+# How autonomous the Claude brain is (its NATIVE CLI tools + permission prompts,
+# separate from Aven's own tools): "off" = sandboxed, no native tools; "web" =
+# read-only WebSearch/WebFetch; "yolo" = every tool incl. Bash/file edits with
+# all permission prompts skipped. See config.yaml for the risk note.
+CLAUDE_AGENT_MODE = (_CFG["llm"].get("claude_agent_mode") or "off").strip().lower()
 
 # --- Tools (Tasmota plugs + weather) ----------------------------------------
 LIGHTS = _CFG.get("lights", {}) or {}
@@ -770,6 +775,22 @@ _CLAUDE_BLOCKED_TOOLS = ["Bash", "Read", "Edit", "Write", "WebFetch", "WebSearch
                          "Glob", "Grep", "Task", "NotebookEdit"]
 
 
+def _claude_agent_flags():
+    """CLI flags for the brain's native tools + permission prompts, per
+    CLAUDE_AGENT_MODE. In 'off' we also strip the CLI's dynamic system-prompt
+    sections (cwd/tools/date) to keep only our prompt; the agent modes keep them
+    so the model actually knows it has web/other tools available."""
+    if CLAUDE_AGENT_MODE == "yolo":
+        # Full autonomy: every native tool (Bash, file edits, web), no prompts.
+        return ["--dangerously-skip-permissions"]
+    if CLAUDE_AGENT_MODE == "web":
+        # Read-only internet only; everything else stays blocked.
+        blocked = [t for t in _CLAUDE_BLOCKED_TOOLS if t not in ("WebSearch", "WebFetch")]
+        return ["--allowedTools", "WebSearch", "WebFetch", "--disallowedTools", *blocked]
+    # off (default): sandboxed — no native tools, only our JSON-directive tools.
+    return ["--exclude-dynamic-system-prompt-sections", "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+
+
 def _claude_tool_doc(tools):
     lines = []
     for t in tools or []:
@@ -791,11 +812,25 @@ def build_claude_system(base, tools):
     doc = _claude_tool_doc(tools)
     if not doc:
         return base
-    return (base + "\n\nYou have NO callable tools or functions — never emit a tool"
-            " call. To perform one of the actions below, your ENTIRE reply must be a"
-            ' single line of JSON and nothing else: {"tool": "<name>", "arguments": {...}}.'
-            " Output it as plain text; do not try to invoke it.\nActions:\n" + doc +
-            "\nIf no action is needed, just answer in one or two short spoken sentences.")
+    # Agent modes give the model real native tools; it must still use the JSON
+    # directive protocol for the hardware actions below (which have no native
+    # equivalent). 'off' has no native tools at all.
+    if CLAUDE_AGENT_MODE == "yolo":
+        native = ("You can use your built-in tools directly — web search, fetching pages,"
+                  " running shell commands, and reading or editing files on this machine —"
+                  " whenever they help you answer or carry out a request. Keep spoken"
+                  " replies short. ")
+    elif CLAUDE_AGENT_MODE == "web":
+        native = ("You can use your built-in web search and page-fetch tools directly to"
+                  " look things up whenever that helps. Keep spoken replies short. ")
+    else:
+        native = ("You have NO callable tools or functions — never emit a tool call. ")
+    return (base + "\n\n" + native + "Separately, the following device actions are NOT"
+            " built-in tools — to perform one, your ENTIRE reply must be a single line of"
+            ' JSON and nothing else: {"tool": "<name>", "arguments": {...}} (output as plain'
+            " text, do not invoke it).\nDevice actions:\n" + doc +
+            "\nWhen you've used a built-in tool or no device action is needed, just answer"
+            " in one or two short spoken sentences.")
 
 
 def _serialize_for_claude(messages):
@@ -834,11 +869,12 @@ def _parse_claude_tool(text):
 def stream_claude(messages, tools=None):
     """Stream a turn via the Claude CLI; yield ('text', token) / ('tool', [calls])."""
     system = messages[0]["content"] if messages and messages[0].get("role") == "system" else DEFAULT_SYSTEM
+    # 'off' answers in one turn; agent modes need extra turns to use a tool then reply.
+    max_turns = "1" if CLAUDE_AGENT_MODE == "off" else "12"
     cmd = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose",
-           "--include-partial-messages", "--max-turns", "1",
+           "--include-partial-messages", "--max-turns", max_turns,
            "--system-prompt", build_claude_system(system, tools),
-           "--exclude-dynamic-system-prompt-sections",  # keep only our system prompt (drop CLI cwd/tools/date)
-           "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+           *_claude_agent_flags()]  # native tools + permission mode (off/web/yolo)
     if CLAUDE_MODEL:
         cmd += ["--model", CLAUDE_MODEL]
     try:
@@ -928,8 +964,7 @@ class ClaudeSession:
                "--input-format", "stream-json", "--output-format", "stream-json",
                "--include-partial-messages", "--verbose",
                "--system-prompt", self._system,
-               "--exclude-dynamic-system-prompt-sections",  # keep only our system prompt (drop CLI cwd/tools/date)
-               "--disallowedTools", *_CLAUDE_BLOCKED_TOOLS]
+               *_claude_agent_flags()]  # native tools + permission mode (off/web/yolo)
         if CLAUDE_MODEL:
             cmd += ["--model", CLAUDE_MODEL]
         self._proc = subprocess.Popen(
@@ -1288,6 +1323,9 @@ def main():
     if BACKEND == "claude":
         model = CLAUDE_MODEL or "cli default"
         backend_desc = f"claude CLI ({CLAUDE_BIN})"
+        if CLAUDE_AGENT_MODE == "yolo":
+            print("\033[31m⚠ claude_agent_mode=yolo: the brain can run ANY tool "
+                  "(incl. Bash) on this host with no prompts.\033[0m", flush=True)
     else:
         model = pick_model(args.model)
         backend_desc = f"rkllama (via {LLM_URL})"
@@ -1299,6 +1337,8 @@ def main():
 
     print("\033[32mLLM node ready.\033[0m")
     print(f"  Backend   : {backend_desc}")
+    if BACKEND == "claude":
+        print(f"  Agent mode: {CLAUDE_AGENT_MODE}  (native tools/permissions)")
     print(f"  LLM model : {model}")
     print(f"  TTS node  : {tts_url}")
     if BACKEND != "claude":

@@ -112,7 +112,10 @@ ttsv2:
 stt:
   # Model name (downloaded from HuggingFace on first use). tiny.en/base.en are
   # the practical CPU choices on a Rock 5C; small.en is slower but more accurate.
-  model: small.en      # tiny/base/small/medium .en — bigger = more accurate, slower
+  model: base.en       # tiny/base/small/medium .en — bigger = more accurate, slower
+                       # base.en ~3x faster than small.en on-board (~1.4s vs ~4.3s for a
+                       # 3s clip) and still transcribes commands correctly; slightly weaker
+                       # on out-of-vocab words, which the initial_prompt/VAD below mitigate.
   language: en          # null = autodetect
   compute_type: int8    # int8 is fastest on CPU; int8_float32 / float32 also work
   beam_size: 1          # 1 = greedy (fastest); higher is slower but more accurate

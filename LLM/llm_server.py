@@ -302,19 +302,45 @@ def play_music(query):
         return "Sorry, I couldn't play that on Spotify."
 
 
+# Generic words that shouldn't drive a playlist match (else "liked songs" matches
+# any playlist containing "songs", e.g. "Similar songs to …").
+_PLAYLIST_STOPWORDS = {"song", "songs", "music", "playlist", "playlists", "similar",
+                       "to", "the", "a", "my", "some", "mix", "list", "play"}
+
+
 def _playlist_match_score(query, name):
-    """Loose name match so 'favorites' finds 'Favoriten', 'classic' finds 'Classic'."""
+    """Loose name match so 'favorites' finds 'Favoriten', 'classic' finds 'Classic',
+    ignoring generic filler words so they don't cause spurious matches."""
     def norm(s):
-        return re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split()
+        return [w for w in re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split()
+                if w not in _PLAYLIST_STOPWORDS]
     qw, nw = norm(query), norm(name)
     if not qw or not nw:
         return 0
     qs, ns = " ".join(qw), " ".join(nw)
-    if qs in ns or ns in qs:
+    if qs == ns or (len(qs) >= 4 and (qs in ns or ns in qs)):
         return 3
     hits = sum(1 for a in qw for b in nw
                if a == b or (len(a) >= 4 and (b.startswith(a) or a.startswith(b))))
     return hits
+
+
+def play_liked_songs(sp, dev_id):
+    """Play the user's Liked Songs (saved tracks), newest addition first."""
+    # current_user_saved_tracks returns newest-first, so playing them in order
+    # starts with the most recently liked song.
+    items = sp.current_user_saved_tracks(limit=50).get("items", []) or []
+    uris = [i["track"]["uri"] for i in items if i.get("track") and i["track"].get("uri")]
+    if not uris:
+        return None
+    sp.start_playback(device_id=dev_id, uris=uris)
+    # Turn shuffle off so it actually keeps starting from the newest one.
+    try:
+        sp.shuffle(False, device_id=dev_id)
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"[tool] play_playlist -> Liked Songs ({len(uris)} tracks, newest first)", flush=True)
+    return "Playing your liked songs, starting with the newest."
 
 
 def play_playlist(query):
@@ -330,6 +356,11 @@ def play_playlist(query):
                        if d.get("name") == SPOTIFY_DEVICE), None)
         if not dev_id:
             return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
+        # 0) "liked / saved songs" -> the real Liked Songs collection, not a playlist.
+        if re.search(r"\b(liked|saved)\b", query.lower()):
+            said = play_liked_songs(sp, dev_id)
+            if said:
+                return said
         # 1) Best match among the user's own playlists (includes private ones).
         own = sp.current_user_playlists(limit=50).get("items", []) or []
         best, best_score = None, 0
@@ -350,6 +381,10 @@ def play_playlist(query):
         if chosen is None:
             return f"I couldn't find a {query} playlist on Spotify."
         sp.start_playback(device_id=dev_id, context_uri=chosen["uri"])
+        try:
+            sp.shuffle(False, device_id=dev_id)   # never shuffle by default
+        except Exception:  # noqa: BLE001
+            pass
         print(f"[tool] play_playlist({query!r}) -> {chosen['name']!r} (score {best_score})", flush=True)
         return f"Playing {where} {chosen['name']} playlist."
     except Exception as exc:  # noqa: BLE001
@@ -1211,10 +1246,12 @@ class ClaudeSession:
                 text_here = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
                 if text_here.strip():
                     last_text = text_here
-                for b in blocks:            # timer tool calls -> control events
+                for b in blocks:            # surface tool calls (log) + timer controls
                     if b.get("type") == "tool_use" and b.get("id") not in seen_tools:
                         seen_tools.add(b.get("id"))
-                        ctrl = _timer_control(b.get("name"), b.get("input"))
+                        name = b.get("name") or "?"
+                        yield ("tool_log", name.replace("mcp__aven__", ""))
+                        ctrl = _timer_control(name, b.get("input"))
                         if ctrl:
                             yield ("control", ctrl)
         spoken = (final if (final and final.strip()) else last_text).strip()
@@ -1336,6 +1373,8 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
                     # Claude/MCP path: a timer tool call -> forward the schedule/
                     # cancel event to the coordinator (it owns the speaker).
                     events.put(("control", val))
+                elif kind == "tool_log":
+                    events.put(("tool_log", val))   # forwarded to the coordinator's log
                 elif kind == "tool":
                     # A batch may mix action tools (set_light/set_timer/say — fixed
                     # confirmations + control events) and data tools (weather/web —
@@ -1388,6 +1427,8 @@ def run_turn(conn, tts_url, prompt, history, model, claude_session=None):
             kind, payload = events.get()
             if kind == "control":
                 conn.send(json.dumps(payload))     # e.g. {"type":"timer","seconds":N}
+            elif kind == "tool_log":
+                conn.send(json.dumps({"type": "tool", "name": payload}))
             elif kind == "llm":
                 conn.send(json.dumps({"type": "llm", "text": payload}))
             elif kind == "clause":

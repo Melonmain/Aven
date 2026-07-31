@@ -302,6 +302,8 @@ def _stream_reply(ws, text, player, stop_event=None):
                     first_tok = time.perf_counter()
                     log.info("%-4s : first token @ %.0f ms", LLM_LABEL, ms(first_tok))
                 sys.stdout.write(event["text"]); sys.stdout.flush()
+            elif etype == "tool":
+                log.info("TOOL : %s", event.get("name", "?"))
             elif etype == "timer":
                 schedule_timer(int(event.get("seconds", 0)), player)
             elif etype == "cancel_timer":

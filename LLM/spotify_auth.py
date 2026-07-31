@@ -24,10 +24,11 @@ if not (os.environ.get("SPOTIPY_CLIENT_ID") and os.environ.get("SPOTIPY_CLIENT_S
 
 cache = str(pathlib.Path(__file__).resolve().parent / ".spotify_cache")
 auth = SpotifyOAuth(
-    # recently-played lets resume_music restart the last track (in its playlist/
-    # album context) after the live session has expired — "continue" after a gap.
+    # recently-played lets resume_music restart the last track after the live
+    # session expired ("continue" after a gap); playlist-read-private lets
+    # play_playlist find the user's own/private playlists ("play my favorites").
     scope="user-modify-playback-state user-read-playback-state "
-          "user-read-recently-played",
+          "user-read-recently-played playlist-read-private",
     redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
     cache_path=cache, open_browser=False)
 

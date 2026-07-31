@@ -330,6 +330,7 @@ tools' results back so it phrases one combined spoken reply.
 | *"who won the 2025 Nobel Prize in Physics?"* | `search_web` | Live internet research via a dedicated Claude web-search call (reuses the host's Claude auth, no API key); the answer is fed back so the model phrases the reply. |
 | *"turn the volume up"*, *"set the volume to 50"* | `set_volume` | While music plays, changes **Spotify's** own volume (Web API) so the assistant's voice is untouched; otherwise changes the hardware ALSA `PCM` level (up/down/exact). |
 | *"play some Daft Punk"* | `play_music` | Spotify search + playback on the `Aven` device. |
+| *"play a classic playlist"*, *"play my favorites"* | `play_playlist` | Matches your own playlists (incl. private) first, else the top public playlist for the query. |
 | *"stop"*, *"pause"*, *"shut up"* | `stop_music` | Pauses Spotify. **Shortcut.** |
 | *"continue"*, *"resume"*, *"keep playing"* | `resume_music` | Resumes the last Spotify playback. **Shortcut.** |
 

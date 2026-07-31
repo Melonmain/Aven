@@ -104,8 +104,9 @@ if LIGHTS:
 if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
 if SPOTIFY_ENABLED:
-    DEFAULT_SYSTEM += (" Use play_music to play music, resume_music to continue"
-                      " paused music, and stop_music to stop it on Spotify.")
+    DEFAULT_SYSTEM += (" Use play_music to play a song or artist, play_playlist to play a"
+                      " playlist (e.g. a genre or the user's favorites), resume_music to"
+                      " continue paused music, and stop_music to stop it on Spotify.")
 if VOLUME_ENABLED or SPOTIFY_ENABLED:
     DEFAULT_SYSTEM += (" Use set_volume to make it louder or quieter; while music plays it"
                        " changes the music volume, otherwise the assistant's.")
@@ -201,6 +202,15 @@ def build_tools():
                 "required": ["query"]},
         }})
         tools.append({"type": "function", "function": {
+            "name": "play_playlist",
+            "description": "Play a Spotify playlist. Use for requests like 'play a classic "
+                           "playlist' or 'play my favorites'. Checks the user's own playlists "
+                           "(including private) first, then public playlists.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "playlist name or theme, e.g. 'classic', 'favorites'"}},
+                "required": ["query"]},
+        }})
+        tools.append({"type": "function", "function": {
             "name": "resume_music",
             "description": "Resume or continue paused music.",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -248,7 +258,7 @@ def _spotify():
         from spotipy.oauth2 import SpotifyOAuth
         auth = SpotifyOAuth(
             scope="user-modify-playback-state user-read-playback-state "
-                  "user-read-recently-played",
+                  "user-read-recently-played playlist-read-private",
             redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
             cache_path=SPOTIFY_CACHE, open_browser=False)
         _spotify_client = (spotipy.Spotify(auth_manager=auth), auth)
@@ -277,6 +287,61 @@ def play_music(query):
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] play_music({query!r}) -> FAIL: {exc}", flush=True)
         return "Sorry, I couldn't play that on Spotify."
+
+
+def _playlist_match_score(query, name):
+    """Loose name match so 'favorites' finds 'Favoriten', 'classic' finds 'Classic'."""
+    def norm(s):
+        return re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split()
+    qw, nw = norm(query), norm(name)
+    if not qw or not nw:
+        return 0
+    qs, ns = " ".join(qw), " ".join(nw)
+    if qs in ns or ns in qs:
+        return 3
+    hits = sum(1 for a in qw for b in nw
+               if a == b or (len(a) >= 4 and (b.startswith(a) or a.startswith(b))))
+    return hits
+
+
+def play_playlist(query):
+    """Play a Spotify playlist: prefer the user's own playlists (incl. private,
+    so 'my favorites' works), else the best public search result."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
+                       if d.get("name") == SPOTIFY_DEVICE), None)
+        if not dev_id:
+            return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
+        # 1) Best match among the user's own playlists (includes private ones).
+        own = sp.current_user_playlists(limit=50).get("items", []) or []
+        best, best_score = None, 0
+        for p in own:
+            if not p:
+                continue
+            s = _playlist_match_score(query, p.get("name", ""))
+            if s > best_score:
+                best, best_score = p, s
+        chosen, where = (best, "your") if best_score >= 1 else (None, None)
+        # 2) Otherwise, the top public playlist for the query. Spotify's playlist
+        #    search sprinkles null items in, so fetch several and take the first real one.
+        if chosen is None:
+            items = sp.search(q=query, type="playlist", limit=10).get("playlists", {}).get("items", [])
+            items = [p for p in items if p and p.get("uri")]
+            if items:
+                chosen, where = items[0], "the"
+        if chosen is None:
+            return f"I couldn't find a {query} playlist on Spotify."
+        sp.start_playback(device_id=dev_id, context_uri=chosen["uri"])
+        print(f"[tool] play_playlist({query!r}) -> {chosen['name']!r} (score {best_score})", flush=True)
+        return f"Playing {where} {chosen['name']} playlist."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] play_playlist({query!r}) -> FAIL: {exc}", flush=True)
+        return "Sorry, I couldn't play that playlist."
 
 
 def resume_music():

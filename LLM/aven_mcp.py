@@ -91,6 +91,8 @@ def call_tool(name, args):
         return A.get_weather()
     if name == "play_music":
         return A.play_music(args.get("query", ""))
+    if name == "play_playlist":
+        return A.play_playlist(args.get("query", ""))
     if name == "resume_music":
         return A.resume_music()
     if name == "stop_music":

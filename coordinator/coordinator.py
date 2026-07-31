@@ -557,17 +557,19 @@ def _is_speech(m, vad, energy_threshold):
     return False
 
 
-def record_utterance(stream, cc, channels, vad):
+def record_utterance(stream, cc, channels, vad, noise_floor=None):
     """Record from wake until the speaker stops (end-pointing).
 
     Wait for speech to start, then stop once `silence_timeout` of non-speech
     follows — so it ends right when you finish, instead of a fixed timeout.
 
-    A frame counts as speech only if it BOTH passes the VAD and rises clearly
-    above an adaptive noise floor. The floor tracks the ambient level (falling
-    fast toward quiet, rising slowly), so steady background noise — an open
-    window, a fan — is learned and no longer keeps the recording alive after
-    you finish. `speech_energy_factor` is how far above the floor speech must be.
+    A frame counts as speech only if it BOTH passes the VAD and rises
+    `speech_energy_factor` above the ambient noise floor. The floor comes from
+    the wake loop (which has been sampling the room's steady background — an open
+    window, a fan — the whole time it was idle), NOT from the first frame here,
+    which may already be your voice. During recording the floor only tracks
+    *down* (a quieter room), never up, so your speech can never raise the gate
+    above itself and leave the recording running to the cap.
     """
     frames = []
     elapsed = trailing_silence = 0.0
@@ -575,18 +577,14 @@ def record_utterance(stream, cc, channels, vad):
     dur = FRAME / RATE
     factor = float(cc.get("speech_energy_factor", 2.5))
     floor_thr = float(cc["energy_threshold"])
-    floor = None                    # adaptive ambient-noise RMS estimate
+    floor = float(noise_floor) if noise_floor else floor_thr
     while True:
         m = read_mono(stream, channels)
         frames.append(m.tobytes())
         elapsed += dur
         rms = _rms(m)
-        if floor is None:
-            floor = rms
-        elif rms < floor:           # track down toward quiet quickly
+        if rms < floor:                       # room got quieter -> lower the floor
             floor = 0.9 * floor + 0.1 * rms
-        else:                       # rise slowly so a pause doesn't spike it
-            floor = 0.995 * floor + 0.005 * rms
         loud = rms >= max(floor_thr, floor * factor)
         if loud and _is_speech(m, vad, floor_thr):
             started, trailing_silence = True, 0.0
@@ -655,6 +653,11 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     last_wake = None
     vad = make_vad(cc)
     log.info("end-pointing: %s", "webrtcvad" if vad else "energy threshold")
+    # Rolling estimate of the room's noise floor, learned from idle mic frames
+    # (min-tracker: sits at the ambient level, rises at most 2%/frame so the wake
+    # word doesn't inflate it). Handed to record_utterance so end-pointing knows
+    # what "quiet" is before you even start speaking.
+    noise_floor = None
 
     stream, channels = _open_mic(sd, input_device, refresh=False)
     print(f"{GREEN}Aven is listening.{RESET} Say '{wake_key.replace('_', ' ')}'. "
@@ -713,6 +716,8 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                     continue
                 silent_frames = 0
                 tried_reopen = False
+                r = _rms(frame)              # learn the ambient floor while idle
+                noise_floor = r if noise_floor is None else min(r, noise_floor * 1.02)
                 if _score_of(model.predict(frame), wake_key) < threshold:
                     continue
                 t_wake = time.perf_counter()
@@ -735,9 +740,9 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                 pause_t.start()
                 with PLAYBACK_LOCK:
                     player.beep()
-                pcm = record_utterance(stream, cc, channels, vad)
-                log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured",
-                         time.perf_counter() - t_wake, len(pcm) / 2 / RATE)
+                pcm = record_utterance(stream, cc, channels, vad, noise_floor)
+                log.info("REC  : %.2fs (beep+record) -> %.1fs audio captured (floor~%.0f)",
+                         time.perf_counter() - t_wake, len(pcm) / 2 / RATE, noise_floor or 0)
 
                 # Audio is going to STT now -> resume whatever we paused.
                 def _resume():

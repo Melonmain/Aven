@@ -105,8 +105,9 @@ if WEATHER_ENABLED:
     DEFAULT_SYSTEM += f" Use get_weather for the current weather in {WEATHER_LOC}."
 if SPOTIFY_ENABLED:
     DEFAULT_SYSTEM += (" Use play_music to play a song or artist, play_playlist to play a"
-                      " playlist (e.g. a genre or the user's favorites), resume_music to"
-                      " continue paused music, and stop_music to stop it on Spotify.")
+                      " playlist (e.g. a genre or the user's favorites), skip_track to skip"
+                      " to the next song, set_shuffle to turn shuffle on or off, resume_music"
+                      " to continue paused music, and stop_music to stop it on Spotify.")
 if VOLUME_ENABLED or SPOTIFY_ENABLED:
     DEFAULT_SYSTEM += (" Use set_volume to make it louder or quieter; while music plays it"
                        " changes the music volume, otherwise the assistant's.")
@@ -209,6 +210,18 @@ def build_tools():
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "playlist name or theme, e.g. 'classic', 'favorites'"}},
                 "required": ["query"]},
+        }})
+        tools.append({"type": "function", "function": {
+            "name": "skip_track",
+            "description": "Skip to the next song on Spotify.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }})
+        tools.append({"type": "function", "function": {
+            "name": "set_shuffle",
+            "description": "Turn Spotify shuffle on or off.",
+            "parameters": {"type": "object", "properties": {
+                "on": {"type": "boolean", "description": "true = shuffle on, false = shuffle off"}},
+                "required": ["on"]},
         }})
         tools.append({"type": "function", "function": {
             "name": "resume_music",
@@ -342,6 +355,54 @@ def play_playlist(query):
     except Exception as exc:  # noqa: BLE001
         print(f"[tool] play_playlist({query!r}) -> FAIL: {exc}", flush=True)
         return "Sorry, I couldn't play that playlist."
+
+
+def _active_device_id(sp):
+    """The device Spotify is playing on, else the Aven Connect device, else None."""
+    cur = sp.current_playback()
+    if cur and (cur.get("device") or {}).get("id"):
+        return cur["device"]["id"]
+    return next((d["id"] for d in sp.devices().get("devices", [])
+                 if d.get("name") == SPOTIFY_DEVICE), None)
+
+
+def skip_track():
+    """Skip to the next song on Spotify."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        dev_id = _active_device_id(sp)
+        if not dev_id:
+            return "Nothing is playing."
+        sp.next_track(device_id=dev_id)
+        print("[tool] skip_track", flush=True)
+        return "Okay, skipping ahead."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] skip_track -> {exc}", flush=True)
+        return "Sorry, I couldn't skip the song."
+
+
+def set_shuffle(on):
+    """Turn Spotify shuffle on or off (plain shuffle, not smart shuffle)."""
+    if not SPOTIFY_ENABLED:
+        return "Spotify isn't set up."
+    on = bool(on)
+    try:
+        sp, auth = _spotify()
+        if not auth.cache_handler.get_cached_token():
+            return "Spotify isn't authorized yet."
+        dev_id = _active_device_id(sp)
+        if not dev_id:
+            return "Nothing is playing."
+        sp.shuffle(on, device_id=dev_id)
+        print(f"[tool] set_shuffle({on})", flush=True)
+        return "Shuffle is on." if on else "Shuffle is off."
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool] set_shuffle({on}) -> {exc}", flush=True)
+        return "Sorry, I couldn't change shuffle."
 
 
 def resume_music():
@@ -606,6 +667,14 @@ _STOP_RE = re.compile(
 _RESUME_RE = re.compile(
     r"^\s*(continue|resume|unpause|carry on|keep (playing|going))"
     r"( (the )?(music|song|playback|playing|spotify))?\s*[.!]*\s*$", re.I)
+_SKIP_RE = re.compile(
+    r"^\s*(skip|next)( (song|track|this|it|one|please))*\s*[.!]*\s*$", re.I)
+_SHUFFLE_OFF_RE = re.compile(
+    r"^\s*(shuffle off|no shuffle|turn off shuffle|disable shuffle|stop shuffling)"
+    r"( (the )?(music|songs?))?\s*[.!]*\s*$", re.I)
+_SHUFFLE_ON_RE = re.compile(
+    r"^\s*(shuffle on|turn on shuffle|enable shuffle|shuffle)"
+    r"( (the )?(music|songs?))?\s*[.!]*\s*$", re.I)
 
 # Lights: match either word order ("turn on the bed light" / "bed light off"),
 # any configured light name plus all/lights/everything -> "all".
@@ -630,6 +699,12 @@ def quick_intent(prompt):
             return stop_music()
         if _RESUME_RE.match(p):
             return resume_music()
+        if _SKIP_RE.match(p):
+            return skip_track()
+        if _SHUFFLE_OFF_RE.match(p):   # check 'off' before the bare-'shuffle' -> on
+            return set_shuffle(False)
+        if _SHUFFLE_ON_RE.match(p):
+            return set_shuffle(True)
     if _LIGHT_RE is not None:
         m = _LIGHT_RE.match(p)
         if m:

@@ -331,6 +331,8 @@ tools' results back so it phrases one combined spoken reply.
 | *"turn the volume up"*, *"set the volume to 50"* | `set_volume` | While music plays, changes **Spotify's** own volume (Web API) so the assistant's voice is untouched; otherwise changes the hardware ALSA `PCM` level (up/down/exact). |
 | *"play some Daft Punk"* | `play_music` | Spotify search + playback on the `Aven` device. |
 | *"play a classic playlist"*, *"play my favorites"* | `play_playlist` | Matches your own playlists (incl. private) first, else the top public playlist for the query. |
+| *"skip"*, *"next song"* | `skip_track` | Skips to the next track. **Shortcut.** |
+| *"shuffle on"*, *"no shuffle"* | `set_shuffle` | Turns Spotify shuffle on/off. **Shortcut.** |
 | *"stop"*, *"pause"*, *"shut up"* | `stop_music` | Pauses Spotify. **Shortcut.** |
 | *"continue"*, *"resume"*, *"keep playing"* | `resume_music` | Resumes the last Spotify playback. **Shortcut.** |
 

@@ -93,6 +93,10 @@ def call_tool(name, args):
         return A.play_music(args.get("query", ""))
     if name == "play_playlist":
         return A.play_playlist(args.get("query", ""))
+    if name == "skip_track":
+        return A.skip_track()
+    if name == "set_shuffle":
+        return A.set_shuffle(args.get("on"))
     if name == "resume_music":
         return A.resume_music()
     if name == "stop_music":

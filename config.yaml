@@ -137,9 +137,9 @@ stt:
 # Wakeword — openWakeWord, CPU (ONNX). Listens to the mic and fires on the
 # wake phrase, which would then kick off STT -> LLM -> TTS.
 wakeword:
-  # Pretrained model name shipped by openWakeWord (downloaded on first use).
-  # Options include: hey_jarvis, alexa, hey_mycroft, hey_rhasspy, timer, weather.
-  model: hey_jarvis
+  # A pretrained name shipped by openWakeWord (hey_jarvis, alexa, hey_mycroft, …)
+  # OR a path to a custom .onnx model. Custom "Hey Aven" model lives at the repo root.
+  model: /home/melon/Aven/hey_aven.onnx
   threshold: 0.5        # detection score (0..1) above which the wake phrase fires
 
 # Coordinator — the full voice loop client (mic -> wakeword -> record -> STT ->

@@ -619,10 +619,15 @@ def _open_mic(sd, device, refresh=True):
 
 
 def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=None):
+    import os
     import sounddevice as sd
     from openwakeword.model import Model
 
-    print(f"Loading wakeword '{model_name}' (cpu/onnx)…", flush=True)
+    # model_name may be a pretrained name ("hey_jarvis") or a path to a custom
+    # .onnx ("/home/melon/Aven/hey_aven.onnx"). openWakeWord keys its prediction
+    # dict by the model's basename, so derive that key for scoring/display.
+    wake_key = os.path.splitext(os.path.basename(model_name))[0]
+    print(f"Loading wakeword '{wake_key}' (cpu/onnx)…", flush=True)
     try:
         model = Model(wakeword_models=[model_name], inference_framework="onnx")
     except Exception:
@@ -635,7 +640,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
     log.info("end-pointing: %s", "webrtcvad" if vad else "energy threshold")
 
     stream, channels = _open_mic(sd, input_device, refresh=False)
-    print(f"{GREEN}Aven is listening.{RESET} Say '{model_name.replace('_', ' ')}'. "
+    print(f"{GREEN}Aven is listening.{RESET} Say '{wake_key.replace('_', ' ')}'. "
           f"(mic {channels}ch; Ctrl+C to quit)")
     _last_frame_at[0] = time.time()
     threading.Thread(target=_mic_watchdog, daemon=True).start()
@@ -691,7 +696,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                     continue
                 silent_frames = 0
                 tried_reopen = False
-                if _score_of(model.predict(frame), model_name) < threshold:
+                if _score_of(model.predict(frame), wake_key) < threshold:
                     continue
                 t_wake = time.perf_counter()
                 # New conversation if too long since the previous wake-word.
@@ -700,7 +705,7 @@ def wake_loop(stt_url, llm_url, model_name, threshold, cc, player, input_device=
                     session.clear()
                     log.info("MEM  : reset conversation (%.0fs since last wake)", gap)
                 last_wake = time.time()
-                log.info("WAKE : '%s' detected%s", model_name,
+                log.info("WAKE : '%s' detected%s", wake_key,
                          "" if gap is None else f" ({gap:.0f}s since last)")
                 print(f"\n{YELLOW}● wake — listening…{RESET}", flush=True)
                 _stop_reply()   # barge-in: kill any reply still playing/generating

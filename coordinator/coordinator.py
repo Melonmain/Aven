@@ -562,16 +562,33 @@ def record_utterance(stream, cc, channels, vad):
 
     Wait for speech to start, then stop once `silence_timeout` of non-speech
     follows — so it ends right when you finish, instead of a fixed timeout.
+
+    A frame counts as speech only if it BOTH passes the VAD and rises clearly
+    above an adaptive noise floor. The floor tracks the ambient level (falling
+    fast toward quiet, rising slowly), so steady background noise — an open
+    window, a fan — is learned and no longer keeps the recording alive after
+    you finish. `speech_energy_factor` is how far above the floor speech must be.
     """
     frames = []
     elapsed = trailing_silence = 0.0
     started = False
     dur = FRAME / RATE
+    factor = float(cc.get("speech_energy_factor", 2.5))
+    floor_thr = float(cc["energy_threshold"])
+    floor = None                    # adaptive ambient-noise RMS estimate
     while True:
         m = read_mono(stream, channels)
         frames.append(m.tobytes())
         elapsed += dur
-        if _is_speech(m, vad, cc["energy_threshold"]):
+        rms = _rms(m)
+        if floor is None:
+            floor = rms
+        elif rms < floor:           # track down toward quiet quickly
+            floor = 0.9 * floor + 0.1 * rms
+        else:                       # rise slowly so a pause doesn't spike it
+            floor = 0.995 * floor + 0.005 * rms
+        loud = rms >= max(floor_thr, floor * factor)
+        if loud and _is_speech(m, vad, floor_thr):
             started, trailing_silence = True, 0.0
         elif started:
             trailing_silence += dur

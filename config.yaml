@@ -149,9 +149,13 @@ coordinator:
   silence_timeout: 0.6       # stop once this much non-speech follows your words
   min_record_seconds: 0.3    # ignore blips shorter than this
   # End-pointing uses webrtcvad; aggressiveness 0 (lax) .. 3 (strict about
-  # calling audio speech). energy_threshold is the fallback if vad is missing.
-  vad_aggressiveness: 2
-  energy_threshold: 500      # int16 RMS below this counts as silence (fallback)
+  # calling audio speech). 3 rejects background noise best.
+  vad_aggressiveness: 3
+  energy_threshold: 500      # int16 RMS floor; a frame below this is never speech
+  # Speech must be this many times louder than the learned ambient noise floor to
+  # count (adaptive end-pointing). Higher = ends sooner in a noisy room but needs
+  # you to speak up; lower = catches soft speech but may over-record on noise.
+  speech_energy_factor: 2.5
   # USB mic / speakers: null = system default. Once the USB devices are plugged
   # in, set these to the device index or a unique part of its name. List devices
   # with: cd coordinator && uv run python coordinator.py --list-devices

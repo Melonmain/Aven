@@ -210,6 +210,14 @@ class RKLLMModel:
         p.skip_special_token = True
         p.is_async = False
         p.extend_param.base_domain_id = 1
+        # Keep the (very large) token-embedding table on flash rather than RAM.
+        # Loading it into RAM instead is measurably WORSE on this board, even
+        # with 12 GB free — benchmarked on Gemma 4 E2B:
+        #   embed_flash=1: 9.01 tok/s, 230 ms TTFT,  8.6 s load, 2.6 GB resident
+        #   embed_flash=0: 6.55 tok/s, 305 ms TTFT, 87.9 s load, 12.2 GB resident
+        # Generation is ~27% slower in RAM: the embedding table is read once per
+        # token, but resident it evicts the page cache serving the weights that
+        # every layer hits, and NPU inference here is memory-bandwidth bound.
         p.extend_param.embed_flash = 1
         p.extend_param.n_batch = 1
         p.extend_param.use_cross_attn = 0

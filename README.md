@@ -333,7 +333,8 @@ the model's tool choice.
 
 | Say | Tool | What happens |
 |-----|------|--------------|
-| *"turn off the bed light"*, *"lights on"*, *"all lights off"* | `set_light` | Switches Tasmota plugs over HTTP. **Shortcut** for plain on/off phrasing. |
+| *"turn off the bed light"*, *"please turn off all the lights"*, *"kill the lights"* | `set_light` | Switches Tasmota plugs over HTTP. **Shortcut**: matched by slots (a light + a state) rather than one anchored pattern, so filler words, politeness and word order don't matter. Questions and negations never fire it. |
+| *"is the bed light on?"*, *"are the lights on?"* | — | Answered from the plugs' real state. **Shortcut** — otherwise the model treats the question as a command and switches the light. |
 | *"what's the weather?"* | `get_weather` | WeatherAPI → result fed back so the model phrases the reply. |
 | *"set a timer for 5 minutes"* | `set_timer` | Confirms, then the **coordinator** schedules it locally; beeps + "your timer is finished" when it fires. |
 | *"cancel the timer"* | `cancel_timer` | Cancels the running timer(s); the coordinator (which owns the timer) speaks the result. |

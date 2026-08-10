@@ -781,16 +781,101 @@ _DATE_RE = re.compile(
 # Lights: match either word order ("turn on the bed light" / "bed light off"),
 # any configured light name plus all/lights/everything -> "all".
 _ALL_WORDS = {"all", "lights", "light", "everything"}
-if LIGHTS:
-    _names = "|".join(map(re.escape, LIGHTS)) + r"|all|lights|light|everything"
-    _LIGHT_RE = re.compile(
-        r"^\s*(?:turn\s+|switch\s+|put\s+)?(?:"
-        r"(?P<state1>on|off)\s+(?:the\s+)?(?P<tgt1>" + _names + r")(?:\s+lights?)?"
-        r"|"
-        r"(?:the\s+)?(?P<tgt2>" + _names + r")(?:\s+lights?)?\s+(?P<state2>on|off)"
-        r")\s*[.!]*\s*$", re.I)
-else:
-    _LIGHT_RE = None
+
+# Light commands are matched by slots, not by one anchored pattern: find a light
+# to act on and a state to put it in, and ignore the filler around them. An
+# anchored regex missed most natural phrasings ("turn off ALL THE lights",
+# "PLEASE turn off the bed light", "COULD YOU turn on the tv light").
+_LIGHT_GENERIC = {"light", "lights", "lamp", "lamps"}
+_LIGHT_ALL = {"all", "everything", "every"}
+_STATE_OFF = {"off", "out", "dark", "darkness"}
+_STATE_ON = {"on", "bright", "brighter"}
+_OFF_VERBS = {"kill", "extinguish", "douse"}          # "kill the lights"
+_ACTION_VERBS = {"turn", "switch", "put", "set", "make", "flip", "power", "shut",
+                 "hit", "toggle"} | _OFF_VERBS
+# Never act on a question or a negated request — a false positive silently
+# switches the user's lights, which is worse than falling through to the model.
+_INTERROGATIVE = {"what", "why", "which", "who", "whose", "how", "when", "whether"}
+_QUESTION_LEAD = {"is", "are", "was", "were", "did", "does", "do", "has", "have", "should"}
+_NEGATIONS = {"dont", "don't", "not", "never", "cant", "can't", "without", "instead"}
+_POLITE = {"can", "could", "would", "will", "please", "pls", "kindly"}
+# Nouns that mean the user meant some other device, not the lights.
+_OTHER_DEVICE = {"music", "song", "songs", "spotify", "playback", "volume",
+                 "timer", "alarm", "sound", "audio", "podcast", "radio"}
+
+
+def match_light_intent(text):
+    """(targets, state) for a light command, else None. Tolerant of filler words."""
+    if not LIGHTS:
+        return None
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if not words:
+        return None
+    ws = set(words)
+    named = [n for n in LIGHTS if n in ws]
+    if not (named or ws & _LIGHT_GENERIC):
+        # No light named. "turn everything off" still means the lights — but only
+        # when nothing else is named, so "turn off all the music" doesn't match.
+        if not (ws & _LIGHT_ALL) or ws & _OTHER_DEVICE:
+            return None
+    if ws & _NEGATIONS or ws & _INTERROGATIVE:
+        return None                                    # "don't …" / "why is …"
+    # "is the bed light on?" is a question; "could you turn the light on" is not.
+    if words[0] in _QUESTION_LEAD and not (ws & _POLITE and ws & _ACTION_VERBS):
+        return None
+    if ws & _STATE_OFF or ws & _OFF_VERBS:
+        state = "off"
+    elif ws & _STATE_ON:
+        state = "on"
+    else:
+        return None                                    # no state -> not a command
+    targets = ["all"] if (ws & _LIGHT_ALL or not named) else named
+    return targets, state
+
+
+def query_light_state(light):
+    """Ask a Tasmota plug whether it's on; returns 'on'/'off'/None."""
+    ip = LIGHTS.get(light)
+    if not ip:
+        return None
+    try:
+        r = requests.get(f"http://{ip}/cm?cmnd=Power", timeout=5)
+        power = (r.json() or {}).get("POWER", "")
+        return power.lower() if power.lower() in ("on", "off") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def match_light_query(text):
+    """Targets for a "is the X light on?" question, else None.
+
+    Answering these ourselves matters: left to the model, a question about a
+    light gets treated as a command (it once replied "Okay, I've turned the bed
+    light off" to "is the bed light on").
+    """
+    if not LIGHTS:
+        return None
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if not words:
+        return None
+    ws = set(words)
+    if not (ws & _LIGHT_GENERIC or [n for n in LIGHTS if n in ws]):
+        return None
+    asking = words[0] in _QUESTION_LEAD or bool(ws & _INTERROGATIVE)
+    if not asking or not (ws & (_STATE_ON | _STATE_OFF) or ws & {"status", "state"}):
+        return None
+    named = [n for n in LIGHTS if n in ws]
+    return named or list(LIGHTS)
+
+
+def answer_light_state(targets):
+    states = [(t, query_light_state(t)) for t in targets]
+    known = [(t, s) for t, s in states if s]
+    if not known:
+        return "Sorry, I couldn't reach the lights."
+    if len(known) == 1:
+        return f"The {known[0][0]} light is {known[0][1]}."
+    return " ".join(f"The {t} light is {s}." for t, s in known)
 
 
 def quick_intent(prompt):
@@ -811,12 +896,13 @@ def quick_intent(prompt):
             return set_shuffle(False)
         if _SHUFFLE_ON_RE.match(p):
             return set_shuffle(True)
-    if _LIGHT_RE is not None:
-        m = _LIGHT_RE.match(p)
-        if m:
-            tgt = (m.group("tgt1") or m.group("tgt2")).lower()
-            state = (m.group("state1") or m.group("state2")).lower()
-            return apply_light("all" if tgt in _ALL_WORDS else tgt, state)
+    query = match_light_query(p)          # check questions before commands
+    if query:
+        return answer_light_state(query)
+    light = match_light_intent(p)
+    if light:
+        targets, state = light
+        return " ".join(apply_light(t, state) for t in targets)
     return None
 
 

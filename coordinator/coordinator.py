@@ -46,7 +46,8 @@ log = logging.getLogger("aven")
 
 _CFG = load_config()
 # Log label reflecting which brain the LLM node uses (see llm.backend in config).
-LLM_LABEL = "CLAUDE" if (_CFG.get("llm", {}).get("backend") or "claude").strip().lower() == "claude" else "LLM"
+_BACKEND = (_CFG.get("llm", {}).get("backend") or "claude").strip().lower()
+LLM_LABEL = {"claude": "CLAUDE", "rkllm": "GEMMA"}.get(_BACKEND, "LLM")
 RATE = 16000
 FRAME = 1280  # 80 ms @ 16 kHz
 

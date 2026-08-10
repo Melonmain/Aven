@@ -1,0 +1,6 @@
+# Let the Aven LLM node heal a dead Spotify Connect session.
+# librespot can stay running while its Spirc session dies (see "Spirc shut down
+# unexpectedly" / "Websocket peer does not respond" in journalctl -u raspotify),
+# which silently removes the "Aven" device from Spotify's Web API. Restarting
+# the service is the only reliable fix, so allow exactly that - nothing else.
+melon ALL=(root) NOPASSWD: /usr/bin/systemctl restart raspotify, /usr/bin/systemctl is-active raspotify

@@ -51,6 +51,10 @@ _TTS_HOST, TTS_WS_PORT = service_addr("tts")          # the TTS node
 
 DEFAULT_MODEL = _CFG["llm"]["model"]
 DEFAULT_SYSTEM = _CFG["llm"]["system_prompt"]
+# The un-augmented prompt. The per-tool "Use X to ..." sentences appended below
+# help the big models but just bloat the context for the small local one, which
+# already gets an explicit action list.
+BASE_SYSTEM = DEFAULT_SYSTEM
 KEEPALIVE_MIN = _CFG["llm"].get("keepalive_minutes", 0)
 
 # Backend: "claude" (Claude CLI, default) or "rkllama" (local NPU model).
@@ -62,6 +66,12 @@ CLAUDE_MODEL = _CFG["llm"].get("claude_model")   # None -> the CLI's default mod
 # read-only WebSearch/WebFetch; "yolo" = every tool incl. Bash/file edits with
 # all permission prompts skipped. See config.yaml for the risk note.
 CLAUDE_AGENT_MODE = (_CFG["llm"].get("claude_agent_mode") or "off").strip().lower()
+
+# Local NPU backend ("rkllm"): a .rkllm model run in-process via librkllmrt.
+RKLLM_CFG = _CFG["llm"].get("rkllm", {}) or {}
+RKLLM_MODEL_PATH = RKLLM_CFG.get("model_path") or ""
+RKLLM_LIB_PATH = RKLLM_CFG.get("lib_path") or (
+    "/home/melon/Aven/LLM/rkllama/venv/lib/python3.12/site-packages/rkllama/lib/librkllmrt.so")
 
 # MCP: Aven's own tools are exposed to the CLI as NATIVE tools via aven_mcp.py, so
 # the brain calls them as structured tool calls (reliable) instead of the old
@@ -262,6 +272,60 @@ def get_weather():
 # Credentials come from the environment (set in .env.local); a one-time sign-in
 # (spotify_auth.py) writes the token cache the server reuses. Config above.
 _spotify_client = None
+_last_librespot_restart = 0.0
+
+
+def _restart_librespot():
+    """Restart raspotify so the Aven Connect device comes back.
+
+    librespot's process can stay alive while its Spirc session dies (the journal
+    shows "Spirc shut down unexpectedly" / "Websocket peer does not respond"),
+    which silently drops "Aven" from Spotify's Web API — every play/resume then
+    fails with "the speaker isn't available". systemd can't catch it because the
+    process never exits, so we restart it ourselves. Needs the sudoers drop-in
+    from deploy/aven-raspotify-sudoers. Rate-limited so a genuinely offline
+    Spotify can't cause a restart loop.
+    """
+    global _last_librespot_restart
+    if time.time() - _last_librespot_restart < 60:
+        return False
+    _last_librespot_restart = time.time()
+    try:
+        r = subprocess.run(["sudo", "-n", "systemctl", "restart", "raspotify"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            print(f"[spotify] librespot restart failed: {(r.stderr or '').strip()[:120]}", flush=True)
+            return False
+        print("[spotify] restarted librespot (dead Connect session)", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[spotify] librespot restart error: {exc}", flush=True)
+        return False
+
+
+def _aven_device_id(sp, heal=True):
+    """Id of the Aven Connect device, healing a dead librespot session if needed."""
+    def find():
+        try:
+            return next((d["id"] for d in sp.devices().get("devices", [])
+                         if d.get("name") == SPOTIFY_DEVICE), None)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[spotify] device list failed: {exc}", flush=True)
+            return None
+
+    dev_id = find()
+    if dev_id or not heal:
+        return dev_id
+    if not _restart_librespot():
+        return None
+    for _ in range(12):          # librespot needs a few seconds to log back in
+        time.sleep(1.5)
+        dev_id = find()
+        if dev_id:
+            print("[spotify] Aven device is back", flush=True)
+            return dev_id
+    print("[spotify] Aven device did not return after restart", flush=True)
+    return None
 
 
 def _spotify():
@@ -290,8 +354,7 @@ def play_music(query):
         if not items:
             return f"I couldn't find {query} on Spotify."
         track = items[0]
-        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
-                       if d.get("name") == SPOTIFY_DEVICE), None)
+        dev_id = _aven_device_id(sp)
         if not dev_id:
             return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
         sp.start_playback(device_id=dev_id, uris=[track["uri"]])
@@ -352,8 +415,7 @@ def play_playlist(query):
         sp, auth = _spotify()
         if not auth.cache_handler.get_cached_token():
             return "Spotify isn't authorized yet."
-        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
-                       if d.get("name") == SPOTIFY_DEVICE), None)
+        dev_id = _aven_device_id(sp)
         if not dev_id:
             return f"The {SPOTIFY_DEVICE} speaker isn't available on Spotify right now."
         # 0) "liked / saved songs" -> the real Liked Songs collection, not a playlist.
@@ -397,8 +459,7 @@ def _active_device_id(sp):
     cur = sp.current_playback()
     if cur and (cur.get("device") or {}).get("id"):
         return cur["device"]["id"]
-    return next((d["id"] for d in sp.devices().get("devices", [])
-                 if d.get("name") == SPOTIFY_DEVICE), None)
+    return _aven_device_id(sp)
 
 
 def skip_track():
@@ -453,8 +514,7 @@ def resume_music():
             return "Music is already playing."
         # Prefer the Aven Connect device; otherwise the device the last
         # playback was on, so resume lands somewhere audible.
-        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
-                       if d.get("name") == SPOTIFY_DEVICE), None)
+        dev_id = _aven_device_id(sp)
         if not dev_id and cur:
             dev_id = cur.get("device", {}).get("id")
         if not dev_id:
@@ -540,8 +600,7 @@ def resume_after_wake():
         cur = sp.current_playback()
         if cur and cur.get("is_playing"):
             return True
-        dev_id = next((d["id"] for d in sp.devices().get("devices", [])
-                       if d.get("name") == SPOTIFY_DEVICE), None)
+        dev_id = _aven_device_id(sp)
         if not dev_id and cur:
             dev_id = cur.get("device", {}).get("id")
         if not dev_id:
@@ -711,6 +770,14 @@ _SHUFFLE_ON_RE = re.compile(
     r"^\s*(shuffle on|turn on shuffle|enable shuffle|shuffle)"
     r"( (the )?(music|songs?))?\s*[.!]*\s*$", re.I)
 
+# Time/date: the local NPU model guesses these instead of calling the tool (it
+# once answered "10:30 AM" at 22:30), so answer them from the clock directly.
+_TIME_RE = re.compile(
+    r"^\s*(what('?s| is)? )?(the )?(current )?time( is it)?( now| please)?\s*[.?!]*\s*$", re.I)
+_DATE_RE = re.compile(
+    r"^\s*(what('?s| is)? )?(the )?(current )?(date|day)( is it)?( today| now)?\s*[.?!]*\s*$"
+    r"|^\s*what day is (it|today)\s*[.?!]*\s*$", re.I)
+
 # Lights: match either word order ("turn on the bed light" / "bed light off"),
 # any configured light name plus all/lights/everything -> "all".
 _ALL_WORDS = {"all", "lights", "light", "everything"}
@@ -729,6 +796,10 @@ else:
 def quick_intent(prompt):
     """Deterministic handling for commands the small model fumbles. Spoken reply or None."""
     p = prompt or ""
+    if _TIME_RE.match(p):
+        return "It's " + time.strftime("%H:%M") + "."
+    if _DATE_RE.match(p):
+        return "Today is " + time.strftime("%A, %B %-d, %Y") + "."
     if SPOTIFY_ENABLED:
         if _STOP_RE.match(p):
             return stop_music()
@@ -907,8 +978,169 @@ def stream_llm(messages, model, tools=None):
     """Stream a turn from the active backend; yield ('text', token) / ('tool', [calls])."""
     if BACKEND == "claude":
         yield from stream_claude(messages, tools)
+    elif BACKEND == "rkllm":
+        yield from _stream_rkllm(messages, tools)
     else:
         yield from _stream_rkllama(messages, model, tools)
+
+
+# --- Local NPU backend (rkllm) ----------------------------------------------
+_rkllm_model = None
+_rkllm_lock = threading.Lock()
+
+
+def get_rkllm_model():
+    """Load the .rkllm model once (first use), then reuse it."""
+    global _rkllm_model
+    with _rkllm_lock:
+        if _rkllm_model is None:
+            from rkllm_backend import RKLLMModel
+            print(f"[rkllm] loading {os.path.basename(RKLLM_MODEL_PATH)} …", flush=True)
+            _rkllm_model = RKLLMModel(
+                RKLLM_MODEL_PATH, RKLLM_LIB_PATH,
+                max_context=RKLLM_CFG.get("max_context", 4096),
+                max_new_tokens=RKLLM_CFG.get("max_new_tokens", 512),
+                temperature=RKLLM_CFG.get("temperature", 0.7),
+                top_k=RKLLM_CFG.get("top_k", 40), top_p=RKLLM_CFG.get("top_p", 0.9),
+                family=RKLLM_CFG.get("family"))
+            print(f"[rkllm] ready in {_rkllm_model.load_seconds:.1f}s "
+                  f"(family {_rkllm_model.family})", flush=True)
+    return _rkllm_model
+
+
+def _compact_tool_doc(tools):
+    """Signatures only — no descriptions. Keeps the local model's prompt small."""
+    lines = []
+    for t in tools or []:
+        fn = t["function"]
+        props = (fn.get("parameters") or {}).get("properties") or {}
+        args = ", ".join(f"{k}={'|'.join(v['enum'])}" if v.get("enum") else k
+                         for k, v in props.items())
+        lines.append(f"- {fn['name']}({args})")
+    return "\n".join(lines)
+
+
+def build_rkllm_prompt(messages, tools):
+    """Build the single user-turn prompt for the local model.
+
+    The chat template already supplies the turn markers, so we must NOT add
+    "User:"/"Assistant:" scaffolding — a small model echoes it back. The model
+    also has no native function calling (rkllm_set_function_tools needs an
+    embedded chat template, which the Gemma 4 build doesn't provide in a
+    parseable form), so tools go through the JSON-directive protocol Aven
+    already parses. Small models need the exact shape shown, not described.
+    """
+    system = BASE_SYSTEM
+    history, user_msg = [], ""
+    for m in messages:
+        role = m.get("role")
+        if role == "system" and m.get("content"):
+            system = m["content"]
+        elif role == "user" and m.get("content"):
+            if user_msg:
+                history.append("Me: " + user_msg)
+            user_msg = m["content"]
+        elif role == "assistant" and m.get("content"):
+            history.append("You: " + m["content"])
+        elif role == "tool" and m.get("content"):
+            history.append("Tool result: " + m["content"])
+
+    doc = _compact_tool_doc(tools)
+    parts = [system]
+    if doc:
+        parts.append(
+            "You can perform these actions:\n" + doc +
+            '\n\nIf the request needs an action, reply with ONLY a JSON object in exactly'
+            ' this shape, and nothing else:\n'
+            '{"tool": "set_light", "arguments": {"light": "bed", "state": "on"}}\n'
+            'For several actions, reply with a JSON array of such objects.\n'
+            'The "tool" value is only the name — never put arguments inside it.\n'
+            'If no action is needed, just answer in one or two short spoken sentences,'
+            ' with no JSON and without repeating the question.')
+    # A custom chat template disables the runtime's thinking suppression, so the
+    # model sometimes emits a "thought" block; ask for the answer only.
+    parts.append("Give only your final answer. Never show your reasoning or thoughts.")
+    if history:
+        parts.append("Recent conversation:\n" + "\n".join(history[-6:]))
+    parts.append("Request: " + user_msg)
+    return "\n\n".join(parts)
+
+
+_THOUGHT_RE = re.compile(r"^\s*(thought|thinking)\b[:\s]*", re.I)
+
+
+def _strip_thought(text):
+    """Drop a leaked reasoning block. skip_special_token eats the real markers,
+    so a thinking turn arrives as a bare 'thought' line; keep what follows it."""
+    s = (text or "").lstrip()
+    if not _THOUGHT_RE.match(s):
+        return text
+    body = _THOUGHT_RE.sub("", s, count=1)
+    # The answer, if any, follows a blank line; otherwise there is nothing usable.
+    return body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
+
+
+_FAKE_CALL_RE = re.compile(r'^\s*[\{\[]?\s*"?tool"?\s*[:=]|^\s*\w+\s*\([^)]*\)\s*$')
+
+
+def _looks_like_broken_call(text):
+    """A malformed tool attempt (e.g. 'set_timer(minutes:3)' or a bad JSON blob)
+    must never be spoken aloud verbatim."""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if _FAKE_CALL_RE.match(s):
+        return True
+    return s.startswith(("{", "[")) and '"tool"' in s
+
+
+def _stream_rkllm(messages, tools=None):
+    """Stream a turn from the local NPU model; yield ('text', tok) / ('tool', calls)."""
+    try:
+        model = get_rkllm_model()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rkllm] load failed: {exc}", flush=True)
+        yield ("text", "Sorry, the local model isn't available.")
+        return
+    prompt = build_rkllm_prompt(messages, tools)
+    buf, mode = "", None
+    for piece in model.generate(prompt):
+        buf += piece
+        if mode is None:
+            stripped = buf.lstrip()
+            if not stripped:
+                continue
+            if tools and stripped[0] in "{[`\"":
+                # Might be a tool directive: buffer it so a malformed one is
+                # never streamed to the speaker.
+                mode = "tool"
+            elif _THOUGHT_RE.match(stripped):
+                mode = "thought"          # leaked reasoning; drop until the answer
+            elif len(stripped) < 8 and stripped.isalpha():
+                continue                  # too early to tell ("thou…")
+            else:
+                mode = "text"
+                yield ("text", buf)       # flush what we buffered while deciding
+                continue
+        if mode == "thought":
+            answer = _strip_thought(buf)
+            if answer:                    # reasoning ended, answer started
+                mode = "text"
+                buf = answer
+                yield ("text", answer)
+            continue
+        if mode == "text":
+            yield ("text", piece)
+    if mode != "tool":
+        return
+    calls = _parse_claude_tool(buf)
+    if calls:
+        yield ("tool", calls)
+    elif _looks_like_broken_call(buf):
+        print(f"[rkllm] discarded malformed tool call: {buf.strip()[:120]!r}", flush=True)
+        yield ("text", "Sorry, I didn't catch that. Could you say it again?")
+    else:
+        yield ("text", buf)
 
 
 def _stream_rkllama(messages, model, tools=None):
@@ -1574,13 +1806,20 @@ def main():
         if CLAUDE_AGENT_MODE == "yolo":
             print("\033[31m⚠ claude_agent_mode=yolo: the brain can run ANY tool "
                   "(incl. Bash) on this host with no prompts.\033[0m", flush=True)
+    elif BACKEND == "rkllm":
+        if not os.path.exists(RKLLM_MODEL_PATH):
+            print(f"\033[31mModel not found: {RKLLM_MODEL_PATH}\033[0m")
+            sys.exit(1)
+        model = os.path.basename(RKLLM_MODEL_PATH)
+        backend_desc = "rkllm (local NPU, in-process)"
+        threading.Thread(target=get_rkllm_model, daemon=True).start()   # preload
     else:
         model = pick_model(args.model)
         backend_desc = f"rkllama (via {LLM_URL})"
     tts_url = f"ws://{args.tts_host}:{args.tts_port}"
     handler = make_handler(tts_url, model, args.system)
 
-    if BACKEND != "claude" and KEEPALIVE_MIN > 0:
+    if BACKEND == "rkllama" and KEEPALIVE_MIN > 0:
         threading.Thread(target=keep_warm, args=(model, KEEPALIVE_MIN), daemon=True).start()
 
     print("\033[32mLLM node ready.\033[0m")
@@ -1589,7 +1828,7 @@ def main():
         print(f"  Agent mode: {CLAUDE_AGENT_MODE}  (native tools/permissions)")
     print(f"  LLM model : {model}")
     print(f"  TTS node  : {tts_url}")
-    if BACKEND != "claude":
+    if BACKEND == "rkllama":
         print(f"  Keep-warm : {'every %d min' % KEEPALIVE_MIN if KEEPALIVE_MIN > 0 else 'off'}")
     print(f"  Listening : ws://{args.host}:{args.port}  (laptop connects to ws://{ROCK5C_IP}:{args.port})")
     with serve(handler, args.host, args.port) as server:

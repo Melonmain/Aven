@@ -31,6 +31,22 @@ It prints a URL; open it in any browser, log in, authorize. The redirect goes to
 port first: `ssh -L 5588:localhost:5588 <user>@<board>`. Once `credentials.json`
 is written it restarts raspotify, and `Aven` is available to play/stop/resume.
 
+## Spotify self-healing (sudoers)
+
+librespot's process can stay alive while its Spirc session dies (`journalctl -u
+raspotify` shows "Spirc shut down unexpectedly" / "Websocket peer does not
+respond"), which silently drops the `Aven` device from Spotify's Web API — every
+play/resume then answers "the speaker isn't available". systemd can't catch it
+because the process never exits, so `llm_server` restarts the service itself when
+the device goes missing. Install the drop-in that permits exactly that:
+
+    sudo install -m 0440 -o root -g root deploy/aven-raspotify-sudoers /etc/sudoers.d/aven-raspotify
+    sudo visudo -c -f /etc/sudoers.d/aven-raspotify     # verify
+
+It allows only `systemctl restart raspotify` and `systemctl is-active raspotify`
+for user `melon` — nothing else. The restart is rate-limited to once a minute so
+a genuinely offline Spotify can't cause a restart loop.
+
 ## Onboard LEDs off (systemd)
 
 `aven-leds-off.service` clears every `/sys/class/leds/*` trigger and zeroes its

@@ -99,9 +99,10 @@ start_one() {
     printf "  ${C_Y}[skip]${C_0}  %-11s no capture device — connect the USB mic, then: %s start coordinator\n" \
            "$name" "$0"; return 0
   fi
-  # The local NPU model is only needed for the rkllama backend; skip it on claude.
-  if [ "$name" = rkllama ] && [ "$(llm_backend)" = claude ]; then
-    printf "  ${C_Y}[skip]${C_0}  %-11s llm.backend=claude (local LLM not needed)\n" "$name"; return 0
+  # The rkllama HTTP server is only needed for the rkllama backend. The claude
+  # and rkllm backends don't use it (rkllm loads the model inside llm_server).
+  if [ "$name" = rkllama ] && [ "$(llm_backend)" != rkllama ]; then
+    printf "  ${C_Y}[skip]${C_0}  %-11s llm.backend=%s (rkllama server not needed)\n" "$name" "$(llm_backend)"; return 0
   fi
   # rkllama's prompt cache can be left corrupt by an unclean shutdown, which
   # silently makes the model emit one token then stop (empty replies, no error).

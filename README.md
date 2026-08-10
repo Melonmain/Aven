@@ -185,11 +185,31 @@ Fresh boards only. Requires [UV](https://docs.astral.sh/uv/) and submodules:
   memory itself. Tool use is parsed from a JSON directive the model prints.
   Optionally pin a model with `llm.claude_model` (default `claude-haiku-4-5`,
   fast and cheap — a good fit for voice).
-- **`rkllama`** — the fully-offline local NPU model (Qwen2.5-3B), set up below.
+- **`rkllm`** — a `.rkllm` model on the RK3588 NPU, loaded **in-process** by
+  `llm_server` via [`LLM/rkllm_backend.py`](LLM/rkllm_backend.py) (no HTTP hop,
+  fully offline). Currently **Gemma 4 E2B**: ~9.5 tok/s, ~250 ms to first token,
+  ~2.5 GB resident, model load ~3 s. Needs **RKLLM runtime ≥ the toolkit version
+  the model was converted with** — Gemma 4 requires librkllmrt **1.3.0**.
+  Configure the path under `llm.rkllm` in [`config.yaml`](config.yaml).
+- **`rkllama`** — the older rkllama HTTP server (Qwen2.5-3B), set up below.
+  Its ctypes bindings target RKLLM **1.2.x** and are binary-incompatible with
+  1.3.0, which is why the `rkllm` backend exists.
 
 Flip `llm.backend` in [`config.yaml`](config.yaml) and restart `llm_server` — no
-other change. Under `claude`, the daemon skips `rkllama` entirely (the NPU stays
-free), and the coordinator log labels each turn `CLAUDE` vs `LLM` accordingly.
+other change. Only the `rkllama` backend starts the rkllama server; the others
+skip it. The coordinator log labels each turn `CLAUDE` / `GEMMA` / `LLM`.
+
+**Why the local model needs a different prompt.** Gemma 4's embedded chat
+template isn't parseable by the RKLLM runtime, so `rkllm_backend` sets one
+explicitly — without that the model emits a single token and stops. Native
+function calling (`rkllm_set_function_tools`) **cannot** be used with this build:
+it requires the embedded template, so it fails whatever order you call it in.
+Tools therefore go through the JSON-directive protocol, with a compact tool list
+(a small model echoes the question when the prompt gets long), a guard that never
+speaks a malformed tool call, and a stripper for leaked `thought` blocks (a
+custom template disables the runtime's thinking suppression). Time/date are
+answered straight from the clock, since the model guesses them.
+
 The rest of this section sets up the **rkllama** backend.
 
 rkllama needs **Python 3.12** (its `rknn-toolkit-lite2` wheels stop at cp312) and

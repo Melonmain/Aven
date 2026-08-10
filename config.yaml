@@ -128,11 +128,12 @@ ttsv2:
 stt:
   # Model name (downloaded from HuggingFace on first use). tiny.en/base.en are
   # the practical CPU choices on a Rock 5C; small.en is slower but more accurate.
-  model: small.en      # tiny/base/small/medium .en — bigger = more accurate, slower
-                       # base.en (~1.5s for a 3s clip) mangled real questions on the mic —
-                       # "how far is the moon away" came out as "How fast and moon away?",
-                       # and garbled input makes the local model parrot it back. small.en
-                       # (~4.9s) transcribes them correctly; accuracy wins here.
+  # distil-* are distilled Whisper: same encoder, much smaller decoder. Measured
+  # on a 3s clip here: base.en 1.5s but mangles words ("texture speech"),
+  # distil-small.en 3.7s and correct, small.en 4.7s and correct. distil-small.en
+  # is the sweet spot — small.en accuracy, ~1s cheaper. (It can't reach base.en
+  # speed: the encoder runs over a padded 30s window and distil keeps it whole.)
+  model: distil-small.en   # tiny/base/small/medium .en, or distil-small.en / distil-medium.en
   language: en          # null = autodetect
   compute_type: int8    # int8 is fastest on CPU; int8_float32 / float32 also work
   beam_size: 5          # 1 = greedy; higher explores more candidates per token.

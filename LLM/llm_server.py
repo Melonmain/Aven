@@ -770,6 +770,14 @@ _SHUFFLE_ON_RE = re.compile(
     r"^\s*(shuffle on|turn on shuffle|enable shuffle|shuffle)"
     r"( (the )?(music|songs?))?\s*[.!]*\s*$", re.I)
 
+# Identity: the local model answers "I am Gemma 4" (ignoring the persona) or
+# mangles the name to "Ave". It's a fixed fact, so don't leave it to the model.
+_NAME_RE = re.compile(
+    r"^\s*(hey |ok |okay )?(what('?s| is)?|whats)\s+(your|ur)\s+name\s*[.?!]*\s*$"
+    r"|^\s*who\s+are\s+you\s*[.?!]*\s*$"
+    r"|^\s*what\s+(are\s+you\s+called|do\s+(i|we)\s+call\s+you)\s*[.?!]*\s*$"
+    r"|^\s*what('?s| is)?\s+your\s+(name|called)\s*[.?!]*\s*$", re.I)
+
 # Time/date: the local NPU model guesses these instead of calling the tool (it
 # once answered "10:30 AM" at 22:30), so answer them from the clock directly.
 _TIME_RE = re.compile(
@@ -881,6 +889,8 @@ def answer_light_state(targets):
 def quick_intent(prompt):
     """Deterministic handling for commands the small model fumbles. Spoken reply or None."""
     p = prompt or ""
+    if _NAME_RE.match(p):
+        return "My name is Aven. I'm your voice assistant."
     if _TIME_RE.match(p):
         return "It's " + time.strftime("%H:%M") + "."
     if _DATE_RE.match(p):

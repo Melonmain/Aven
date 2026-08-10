@@ -126,10 +126,11 @@ ttsv2:
 stt:
   # Model name (downloaded from HuggingFace on first use). tiny.en/base.en are
   # the practical CPU choices on a Rock 5C; small.en is slower but more accurate.
-  model: base.en       # tiny/base/small/medium .en — bigger = more accurate, slower
-                       # base.en ~3x faster than small.en on-board (~1.4s vs ~4.3s for a
-                       # 3s clip) and still transcribes commands correctly; slightly weaker
-                       # on out-of-vocab words, which the initial_prompt/VAD below mitigate.
+  model: small.en      # tiny/base/small/medium .en — bigger = more accurate, slower
+                       # base.en (~1.5s for a 3s clip) mangled real questions on the mic —
+                       # "how far is the moon away" came out as "How fast and moon away?",
+                       # and garbled input makes the local model parrot it back. small.en
+                       # (~4.9s) transcribes them correctly; accuracy wins here.
   language: en          # null = autodetect
   compute_type: int8    # int8 is fastest on CPU; int8_float32 / float32 also work
   beam_size: 5          # 1 = greedy; higher explores more candidates per token.
@@ -164,16 +165,21 @@ wakeword:
 # LLM -> play). Runs on the device with the mic + speakers.
 coordinator:
   max_record_seconds: 10.0   # hard safety cap on one utterance
-  silence_timeout: 0.6       # stop once this much non-speech follows your words
+  silence_timeout: 0.9       # stop once this much non-speech follows your words
+                             # (0.6 cut people off during a normal mid-sentence pause)
   min_record_seconds: 0.3    # ignore blips shorter than this
   # End-pointing uses webrtcvad; aggressiveness 0 (lax) .. 3 (strict about
   # calling audio speech). 3 rejects background noise best.
   vad_aggressiveness: 3
-  energy_threshold: 500      # int16 RMS floor; a frame below this is never speech
+  # Absolute RMS floor below which a frame is never speech. Keep it well under
+  # the room's ambient level (measured ~70-210 here): it is a max() against the
+  # adaptive floor, so setting it too high (it was 500) pinned the gate above
+  # quiet syllables and clipped the ends of sentences.
+  energy_threshold: 180
   # Speech must be this many times louder than the learned ambient noise floor to
   # count (adaptive end-pointing). Higher = ends sooner in a noisy room but needs
   # you to speak up; lower = catches soft speech but may over-record on noise.
-  speech_energy_factor: 2.5
+  speech_energy_factor: 2.0
   # USB mic / speakers: null = system default. Once the USB devices are plugged
   # in, set these to the device index or a unique part of its name. List devices
   # with: cd coordinator && uv run python coordinator.py --list-devices

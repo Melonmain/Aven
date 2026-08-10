@@ -575,11 +575,13 @@ def record_utterance(stream, cc, channels, vad, noise_floor=None):
     above itself and leave the recording running to the cap.
     """
     frames = []
-    elapsed = trailing_silence = 0.0
+    elapsed = trailing_silence = speech_seconds = 0.0
     started = False
     dur = FRAME / RATE
-    factor = float(cc.get("speech_energy_factor", 2.5))
+    factor = float(cc.get("speech_energy_factor", 2.0))
     floor_thr = float(cc["energy_threshold"])
+    min_speech = float(cc.get("min_record_seconds", 0.3))
+    silence_timeout = float(cc["silence_timeout"])
     floor = float(noise_floor) if noise_floor else floor_thr
     while True:
         m = read_mono(stream, channels)
@@ -591,11 +593,16 @@ def record_utterance(stream, cc, channels, vad, noise_floor=None):
         loud = rms >= max(floor_thr, floor * factor)
         if loud and _is_speech(m, vad, floor_thr):
             started, trailing_silence = True, 0.0
+            speech_seconds += dur
         elif started:
             trailing_silence += dur
         if elapsed >= cc["max_record_seconds"]:
             break
-        if started and trailing_silence >= cc["silence_timeout"]:
+        # Only stop once we've actually heard something (min_record_seconds keeps
+        # a cough or a clipped first syllable from ending the turn) AND the
+        # speaker has been quiet for silence_timeout.
+        if (started and trailing_silence >= silence_timeout
+                and speech_seconds >= min_speech):
             break
     return b"".join(frames)
 

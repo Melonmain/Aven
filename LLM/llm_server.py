@@ -1152,6 +1152,47 @@ def build_rkllm_prompt(messages, tools):
     return "\n\n".join(parts)
 
 
+def _norm_words(s):
+    return re.findall(r"[a-z0-9']+", (s or "").lower())
+
+
+def _is_echo(reply, question):
+    """True if the model just parroted the question back.
+
+    Small models do this when the input is garbled — STT turning "how far is the
+    moon away" into "How fast and moon away?" reliably produced the question
+    verbatim as the answer.
+    """
+    r, q = _norm_words(reply), _norm_words(question)
+    if not r or not q:
+        return False
+    if r == q:
+        return True
+    # A short reply that is entirely contained in the question is a parrot too.
+    return len(r) <= len(q) and len(r) >= 3 and set(r).issubset(set(q))
+
+
+# The chat template's turn markers sometimes leak through as literal text
+# ("</start_of_turn>") instead of being skipped as special tokens.
+_TURN_TAG_RE = re.compile(r"</?\s*(start_of_turn|end_of_turn)\s*>?(model|user)?", re.I)
+
+
+def _clean_local_text(text):
+    return _TURN_TAG_RE.sub(" ", text or "")
+
+
+def _strip_echo_prefix(text, question):
+    """Drop leading lines that just parrot the question back before the answer.
+
+    Gemma sometimes replies "<question>\\n</start_of_turn>\\n<real answer>", so a
+    whole-text echo check misses it — the answer is in there, behind the parrot.
+    """
+    lines = [ln for ln in (text or "").split("\n")]
+    while lines and (not lines[0].strip() or _is_echo(lines[0], question)):
+        lines.pop(0)
+    return "\n".join(lines)
+
+
 _THOUGHT_RE = re.compile(r"^\s*(thought|thinking)\b[:\s]*", re.I)
 
 
@@ -1180,6 +1221,67 @@ def _looks_like_broken_call(text):
     return s.startswith(("{", "[")) and '"tool"' in s
 
 
+_ECHO_PROBE = 60          # chars held back before we can rule out a parroted reply
+
+
+def _rkllm_pass(model, prompt, tools, question):
+    """One generation. Yields ('text', chunk) as it streams and returns nothing;
+    the caller inspects `state` for the tool buffer / echo verdict.
+
+    Text is streamed, except for a short head held back long enough to spot a
+    parroted question — an echo must never reach the speaker.
+    """
+    state = {"mode": None, "buf": "", "echo": False, "spoke": False}
+    head, head_flushed = "", False
+    for piece in model.generate(prompt):
+        state["buf"] += piece
+        if state["mode"] is None:
+            stripped = state["buf"].lstrip()
+            if not stripped:
+                continue
+            if tools and stripped[0] in "{[`\"":
+                state["mode"] = "tool"        # buffer: a malformed call must not be spoken
+            elif _THOUGHT_RE.match(stripped):
+                state["mode"] = "thought"     # leaked reasoning; drop until the answer
+            elif len(stripped) < 8 and stripped.isalpha():
+                continue                      # too early to tell ("thou…")
+            else:
+                state["mode"] = "text"
+                head = state["buf"]
+                continue
+        if state["mode"] == "thought":
+            answer = _strip_thought(state["buf"])
+            if answer:
+                state["mode"] = "text"
+                state["buf"] = answer
+                head = answer
+            continue
+        if state["mode"] == "text":
+            if not head_flushed:
+                head = state["buf"]           # buf holds the text so far
+                if len(head) < _ECHO_PROBE:
+                    continue                  # keep holding: might be an echo
+                cleaned = _strip_echo_prefix(_clean_local_text(head), question).strip()
+                if not cleaned or _is_echo(cleaned, question):
+                    state["echo"] = True
+                    return state              # abandon this generation
+                head_flushed = True
+                state["spoke"] = True
+                yield ("text", cleaned)
+                continue
+            state["spoke"] = True
+            yield ("text", _clean_local_text(piece))
+    # Stream ended while still holding the head (a short reply).
+    if state["mode"] == "text" and not head_flushed:
+        cleaned = _strip_echo_prefix(_clean_local_text(head), question).strip()
+        if not cleaned or _is_echo(cleaned, question):
+            state["echo"] = True
+        else:
+            state["spoke"] = True
+            yield ("text", cleaned)
+    return state
+
+
 def _stream_rkllm(messages, tools=None):
     """Stream a turn from the local NPU model; yield ('text', tok) / ('tool', calls)."""
     try:
@@ -1188,37 +1290,27 @@ def _stream_rkllm(messages, tools=None):
         print(f"[rkllm] load failed: {exc}", flush=True)
         yield ("text", "Sorry, the local model isn't available.")
         return
+    question = next((m.get("content", "") for m in reversed(messages)
+                     if m.get("role") == "user"), "")
     prompt = build_rkllm_prompt(messages, tools)
-    buf, mode = "", None
-    for piece in model.generate(prompt):
-        buf += piece
-        if mode is None:
-            stripped = buf.lstrip()
-            if not stripped:
-                continue
-            if tools and stripped[0] in "{[`\"":
-                # Might be a tool directive: buffer it so a malformed one is
-                # never streamed to the speaker.
-                mode = "tool"
-            elif _THOUGHT_RE.match(stripped):
-                mode = "thought"          # leaked reasoning; drop until the answer
-            elif len(stripped) < 8 and stripped.isalpha():
-                continue                  # too early to tell ("thou…")
-            else:
-                mode = "text"
-                yield ("text", buf)       # flush what we buffered while deciding
-                continue
-        if mode == "thought":
-            answer = _strip_thought(buf)
-            if answer:                    # reasoning ended, answer started
-                mode = "text"
-                buf = answer
-                yield ("text", answer)
-            continue
-        if mode == "text":
-            yield ("text", piece)
-    if mode != "tool":
+
+    state = yield from _rkllm_pass(model, prompt, tools, question)
+    if state["echo"]:
+        # The model parroted the question (it does this on garbled STT). Try once
+        # more with a blunter instruction before giving up.
+        print(f"[rkllm] echoed the question, retrying: {question!r}", flush=True)
+        retry = (prompt + "\n\nDo NOT repeat the question. If it is unclear, say you "
+                 "did not catch it. Otherwise answer it directly.")
+        state = yield from _rkllm_pass(model, retry, tools, question)
+        if state["echo"] or not (state["spoke"] or state["mode"] == "tool"):
+            yield ("text", "Sorry, I didn't catch that. Could you say it again?")
+            return
+
+    if state["mode"] != "tool":
+        if not state["spoke"] and not state["echo"]:
+            yield ("text", "Sorry, I didn't catch that. Could you say it again?")
         return
+    buf = state["buf"]
     calls = _parse_claude_tool(buf)
     if calls:
         yield ("tool", calls)
